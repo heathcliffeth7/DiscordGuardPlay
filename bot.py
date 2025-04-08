@@ -5,7 +5,7 @@ import os
 import asyncio
 from datetime import timedelta
 
-# Record function
+# Record function: Adds a record to the Excel file.
 def record_play(discord_id, discord_username, in_game_username, event_name):
     file_name = f"{event_name}_play_records.xlsx"
     if os.path.exists(file_name):
@@ -20,7 +20,7 @@ def record_play(discord_id, discord_username, in_game_username, event_name):
 
 # Intent settings
 intents = discord.Intents.default()
-intents.members = True  # Required to receive member join events
+intents.members = True  # Required for member join events
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -28,10 +28,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 events = {}
 usage_counts = {}
 event_nickname_counts = {}
-event_nickname_limit = {}  # To store same nickname limits for events
+event_nickname_limit = {}  # For same nickname limit
 
-# Security authorization
-security_authorized_role_id = 1234567889   # Your server's Security Manager role ID
+# Security Authorization
+security_authorized_role_id = 1234567889   # Your security manager role ID
 security_authorized_ids = set()
 
 def is_security_authorized(ctx):
@@ -44,8 +44,8 @@ def is_security_authorized(ctx):
             return True
     return False
 
-# Play Event authorization
-play_authorized_role_id = 1325134141414  # Your server's Event Manager role ID
+# Play Event Authorization
+play_authorized_role_id = 1325134141414  # Your event manager role ID
 play_authorized_ids = set()
 
 def is_play_authorized(ctx):
@@ -58,8 +58,8 @@ def is_play_authorized(ctx):
             return True
     return False
 
-# Allowed role IDs for button usage
-allowed_role_ids = [12314155125511255515151]   # Your server's designated role ID
+# Role IDs allowed to use the button
+allowed_role_ids = [12314155125511255515151]   # The role ID defined for button usage
 
 # Global Security Filter Variables
 no_avatar_filter_enabled = False
@@ -86,23 +86,23 @@ async def on_member_join(member):
                     until = discord.utils.utcnow() + timeout_duration
                     await member.edit(timeout=until, reason="No avatar provided")
             except Exception as e:
-                print("Error applying no-avatar filter:", e)
+                print("No-avatar filter error:", e)
     if account_age_filter_enabled:
         account_age = (discord.utils.utcnow() - member.created_at).days
         if account_age < account_age_min_days:
             try:
                 if account_age_action == "ban":
-                    await member.ban(reason="Account age too low")
+                    await member.ban(reason="Account age insufficient")
                 elif account_age_action == "kick":
-                    await member.kick(reason="Account age too low")
+                    await member.kick(reason="Account age insufficient")
                 elif account_age_action == "timeout":
                     timeout_duration = timedelta(minutes=account_age_timeout_duration)
                     until = discord.utils.utcnow() + timeout_duration
-                    await member.edit(timeout=until, reason="Account age too low")
+                    await member.edit(timeout=until, reason="Account age insufficient")
             except Exception as e:
-                print("Error applying account age filter:", e)
+                print("Account age filter error:", e)
 
-# !noavatarfilter Command
+# !noavatarfilter command
 @bot.command(name="noavatarfilter")
 async def noavatarfilter_command(ctx, state: str, mode: str = None, duration: int = None):
     if not is_security_authorized(ctx):
@@ -115,12 +115,12 @@ async def noavatarfilter_command(ctx, state: str, mode: str = None, duration: in
         if mode is not None:
             mode = mode.lower()
             if mode not in ["ban", "kick", "timeout"]:
-                await ctx.send("Please provide a valid mode: ban, kick, or timeout")
+                await ctx.send("Please enter a valid mode: ban, kick or timeout")
                 return
             no_avatar_action = mode
             if mode == "timeout":
                 if duration is None:
-                    await ctx.send("In timeout mode, please provide a timeout duration (in minutes).")
+                    await ctx.send("In timeout mode, please specify a duration (in minutes).")
                     return
                 no_avatar_timeout_duration = duration
         await ctx.send(f"No-avatar filter enabled. Mode: {no_avatar_action}" +
@@ -131,7 +131,7 @@ async def noavatarfilter_command(ctx, state: str, mode: str = None, duration: in
     else:
         await ctx.send("Please type 'on' or 'off'.")
 
-# !accountagefilter Command
+# !accountagefilter command
 @bot.command(name="accountagefilter")
 async def accountagefilter_command(ctx, state: str, min_age: int = None, mode: str = None, duration: int = None):
     if not is_security_authorized(ctx):
@@ -145,27 +145,27 @@ async def accountagefilter_command(ctx, state: str, min_age: int = None, mode: s
         return
     elif state == "on":
         if min_age is None or mode is None:
-            await ctx.send("Please provide a minimum account age (in days) and a mode. Example: `!accountagefilter on 7 timeout 60`")
+            await ctx.send("Please specify the minimum account age (in days) and a mode. Example: `!accountagefilter on 7 timeout 60`")
             return
         account_age_filter_enabled = True
         account_age_min_days = min_age
         mode = mode.lower()
         if mode not in ["ban", "kick", "timeout"]:
-            await ctx.send("Please provide a valid mode: ban, kick, or timeout")
+            await ctx.send("Please enter a valid mode: ban, kick or timeout")
             return
         account_age_action = mode
         if mode == "timeout":
             if duration is None:
-                await ctx.send("In timeout mode, please provide a timeout duration (in minutes).")
+                await ctx.send("In timeout mode, please specify a duration (in minutes).")
                 return
             account_age_timeout_duration = duration
-            await ctx.send(f"Account age filter enabled: Accounts younger than {min_age} days will receive {duration} minutes timeout.")
+            await ctx.send(f"Account age filter enabled: Accounts younger than {min_age} days will be timed out for {duration} minutes.")
         else:
             await ctx.send(f"Account age filter enabled: Accounts younger than {min_age} days will be {mode}ned.")
     else:
         await ctx.send("Please type 'on' or 'off'.")
 
-# !samenicknamefilter Command
+# !samenicknamefilter command
 @bot.command(name="samenicknamefilter")
 async def samenicknamefilter_command(ctx, event_name: str, state: str, limit: int = None):
     if not is_play_authorized(ctx):
@@ -174,17 +174,17 @@ async def samenicknamefilter_command(ctx, event_name: str, state: str, limit: in
     state = state.lower()
     if state == "off":
         event_nickname_limit.pop(event_name, None)
-        await ctx.send(f"Same Nickname Filter disabled for {event_name}. Users can now enter the same nickname unlimited times.")
+        await ctx.send(f"Same nickname filter for {event_name} disabled. Users can now enter unlimited entries.")
     elif state == "on":
         if limit is None:
             await ctx.send("Please provide a limit value. Example: `!samenicknamefilter Tournament2025 on 1`")
             return
         event_nickname_limit[event_name] = limit
-        await ctx.send(f"Same Nickname Filter enabled for {event_name}. Each username can be entered a maximum of {limit} times.")
+        await ctx.send(f"Same nickname filter enabled for {event_name}. Each user can enter {limit} times.")
     else:
         await ctx.send("Please type 'on' or 'off'.")
 
-# ---------------- Other Security Commands ----------------
+# ---------------- Security Commands ----------------
 @bot.command(name="securityauthorizedadd")
 async def securityauthorizedadd(ctx, identifier: str):
     if not is_security_authorized(ctx):
@@ -196,7 +196,7 @@ async def securityauthorizedadd(ctx, identifier: str):
         await ctx.send("Please provide a valid user or role ID.")
         return
     security_authorized_ids.add(id_val)
-    await ctx.send(f"{identifier} is now authorized to use security commands.")
+    await ctx.send(f"{identifier} is now authorized for security commands.")
 
 @bot.command(name="securityauthorizedremove")
 async def securityauthorizedremove(ctx, identifier: str):
@@ -234,7 +234,7 @@ async def securitysettings(ctx):
     if security_authorized_ids:
         ids_str = ", ".join(str(i) for i in security_authorized_ids)
     else:
-        ids_str = "None added"
+        ids_str = "No authorized IDs added"
     embed.add_field(name="Security Authorized IDs", value=ids_str, inline=False)
     await ctx.send(embed=embed)
 
@@ -247,36 +247,29 @@ async def securityhelp(ctx):
         "**Security Commands Help Menu**\n\n"
         "1. **!noavatarfilter on [mode] [duration] / off**\n"
         "   - Description: Checks new members for an avatar. Mode options: `ban`, `kick`, `timeout`.\n"
-        "   - Example: `!noavatarfilter on timeout 60` → Applies 60 minutes timeout to users without an avatar.\n\n"
+        "   - Example: `!noavatarfilter on timeout 60` → Applies a 60-minute timeout to users without an avatar.\n\n"
         "2. **!accountagefilter on <min_days> <mode> [duration] / off**\n"
         "   - Description: Checks new members for account age. Mode options: `ban`, `kick`, `timeout`.\n"
-        "   - Example: `!accountagefilter on 7 timeout 60` → Applies 60 minutes timeout to accounts younger than 7 days.\n\n"
+        "   - Example: `!accountagefilter on 7 timeout 60` → Applies a 60-minute timeout to accounts younger than 7 days.\n\n"
         "3. **!securityauthorizedadd <id>**\n"
-        "   - Description: Adds the provided user or role ID to the security authorized list.\n"
-        "   - Example: `!securityauthorizedadd <@&123456789012345678>`\n\n"
+        "   - Description: Authorizes the specified user or role ID for security commands.\n\n"
         "4. **!securityauthorizedremove <id>**\n"
-        "   - Description: Removes the provided user or role ID from the security authorized list.\n"
-        "   - Example: `!securityauthorizedremove <@&123456789012345678>`\n\n"
-        "5. **!playauthorizedremove <id>**\n"
-        "   - Description: (For Play commands) Removes the provided user or role ID from the play authorized list.\n"
-        "   - Example: `!playauthorizedremove <@&123456789012345678>`\n\n"
-        "6. **!securitysettings**\n"
-        "   - Description: Displays the current security settings (filter statuses, actions, timeout durations, etc.).\n\n"
-        "7. **!securityhelp**\n"
+        "   - Description: Removes the specified user or role ID from the security authorized list.\n\n"
+        "5. **!securitysettings**\n"
+        "   - Description: Displays current security settings (filter statuses, actions, timeout durations, etc.).\n\n"
+        "6. **!securityhelp**\n"
         "   - Description: Shows this help menu.\n"
     )
     await ctx.send(help_text)
 
-# ---------------- End of Security Section ------------------
-
-# ---------------- Event (Play Event) Section ------------------
+# ---------------- Play Event Section ----------------
 @bot.command(name="createplayevent")
 async def createplayevent(ctx, event_name: str):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
         return
     if event_name in events:
-        await ctx.send(f"{event_name} event already exists.")
+        await ctx.send(f"{event_name} event already exists. Recreating with the same name will reset usage counts.")
         return
     events[event_name] = {
         "link": None,
@@ -293,10 +286,10 @@ async def setplaylink(ctx, event_name: str, link: str):
         await ctx.message.delete()
         return
     if event_name not in events:
-        await ctx.send("Event not found. Please create it first with !createplayevent.")
+        await ctx.send("Please create the event first using !createplayevent.")
         return
     events[event_name]["link"] = link
-    await ctx.send(f"Event-specific link set for {event_name}: {link}")
+    await ctx.send(f"Link set for {event_name} event: {link}")
 
 @bot.command(name="setplaychannel")
 async def setplaychannel(ctx, event_name: str, channel_input: str):
@@ -304,19 +297,19 @@ async def setplaychannel(ctx, event_name: str, channel_input: str):
         await ctx.message.delete()
         return
     if event_name not in events:
-        await ctx.send("Event not found. Please create it first with !createplayevent.")
+        await ctx.send("Please create the event first using !createplayevent.")
         return
     try:
         channel_id = int(channel_input.strip("<#>"))
     except ValueError:
-        await ctx.send("Please provide a valid channel ID or mention.")
+        await ctx.send("Please provide a valid channel ID or channel mention.")
         return
     channel = ctx.guild.get_channel(channel_id)
     if channel is None:
         await ctx.send("No channel found with the provided ID.")
         return
     events[event_name]["channel_id"] = channel.id
-    await ctx.send(f"Channel for the event {event_name} has been set to: {channel.mention}")
+    await ctx.send(f"Channel set for {event_name} event: {channel.mention}")
 
 @bot.command(name="setauthorizedrole")
 async def setauthorizedrole(ctx, role_input: str):
@@ -327,14 +320,14 @@ async def setauthorizedrole(ctx, role_input: str):
     try:
         role_id = int(role_input.strip("<@&>"))
     except ValueError:
-        await ctx.send("Please provide a valid role ID or mention.")
+        await ctx.send("Please provide a valid role ID or role mention.")
         return
     role = ctx.guild.get_role(role_id)
     if role is None:
         await ctx.send("No role found with the provided ID.")
         return
     authorized_role_id = role.id
-    await ctx.send(f"Play event authorized role set to: {role.mention}")
+    await ctx.send(f"Authorized role for play event commands set to: {role.mention}")
 
 @bot.command(name="setallowedrole")
 async def setallowedrole(ctx, *, roles: str):
@@ -353,7 +346,7 @@ async def setallowedrole(ctx, *, roles: str):
         except ValueError:
             continue
     allowed_role_ids = role_ids
-    await ctx.send(f"Roles required to use the button have been set: {allowed_role_ids}")
+    await ctx.send(f"Roles allowed for button usage set to: {allowed_role_ids}")
 
 @bot.command(name="removeallowedrole")
 async def removeallowedrole(ctx, *, roles: str):
@@ -374,7 +367,7 @@ async def removeallowedrole(ctx, *, roles: str):
         except ValueError:
             continue
     if removed:
-        await ctx.send(f"Allowed role(s) {removed} have been removed.")
+        await ctx.send(f"Removed roles: {removed}")
     else:
         await ctx.send("The specified roles were not found in the allowed list.")
 
@@ -387,7 +380,7 @@ class PlayModal(discord.ui.Modal, title="Enter Your In-Game Username"):
     )
     def __init__(self, event_name: str, *args, **kwargs):
         self.event_name = event_name
-        self.processed = False  # Flag to prevent double submission.
+        self.processed = False  # Flag to prevent double submission
         super().__init__(*args, **kwargs)
     async def on_submit(self, interaction: discord.Interaction):
         if self.processed:
@@ -397,15 +390,17 @@ class PlayModal(discord.ui.Modal, title="Enter Your In-Game Username"):
         if not nickname:
             await interaction.response.send_message("Please enter a valid username.", ephemeral=True)
             return
+        # Check same nickname limit
         if self.event_name in event_nickname_limit:
             limit = event_nickname_limit[self.event_name]
             if self.event_name not in event_nickname_counts:
                 event_nickname_counts[self.event_name] = {}
             count = event_nickname_counts[self.event_name].get(nickname, 0)
             if count >= limit:
-                await interaction.response.send_message("You have exceeded the limit for this username, please use a different one.", ephemeral=True)
+                await interaction.response.send_message("You have reached the limit for this username, please try a different one.", ephemeral=True)
                 return
             event_nickname_counts[self.event_name][nickname] = count + 1
+        # Record to Excel file in a separate thread to avoid blocking
         asyncio.create_task(asyncio.to_thread(record_play, interaction.user.id, interaction.user.name, nickname, self.event_name))
         key = (self.event_name, interaction.user.id)
         usage_counts[key] = usage_counts.get(key, 0) + 1
@@ -463,13 +458,13 @@ async def sendplay(ctx, event_name: str, channel_id_input: str = None):
         events[event_name]["channel_id"] = channel.id
     else:
         if not events[event_name].get("channel_id"):
-            await ctx.send("No event-specific channel is set. Please use !setplaychannel or provide a channel ID.")
+            await ctx.send("No event-specific channel set. Please use !setplaychannel or provide a channel ID.")
             return
         channel_id = events[event_name]["channel_id"]
         channel = ctx.guild.get_channel(channel_id)
     msg = await channel.send(f"Play button for {event_name} event:", view=PlayView(event_name))
     events[event_name]["message_id"] = msg.id
-    await ctx.send(f"{event_name} event created. Button sent to channel: {channel.mention}")
+    await ctx.send(f"{event_name} event created. Button sent to {channel.mention} channel.")
 
 @bot.command(name="sendplaylimit")
 async def sendplaylimit(ctx, event_name: str, role_input: str, limit: int):
@@ -479,15 +474,15 @@ async def sendplaylimit(ctx, event_name: str, role_input: str, limit: int):
     try:
         role_id = int(role_input.strip("<@&>"))
     except ValueError:
-        await ctx.send("Please provide a valid role ID or mention.")
+        await ctx.send("Please provide a valid role ID or role mention.")
         return
     if event_name not in events:
-        await ctx.send("The specified event was not found.")
+        await ctx.send("Specified event not found.")
         return
     if "limits" not in events[event_name]:
         events[event_name]["limits"] = {}
     events[event_name]["limits"][role_id] = limit
-    await ctx.send(f"Interaction limit for role <@&{role_id}> set to {limit} for event {event_name}.")
+    await ctx.send(f"Interaction limit for <@&{role_id}> set to {limit} for {event_name} event.")
 
 @bot.command(name="sendplaysettings")
 async def sendplaysettings(ctx, event_name: str):
@@ -495,7 +490,7 @@ async def sendplaysettings(ctx, event_name: str):
         await ctx.message.delete()
         return
     if event_name not in events:
-        await ctx.send("The specified event was not found.")
+        await ctx.send("Specified event not found.")
         return
     ev = events[event_name]
     embed = discord.Embed(title=f"{event_name} Event Settings", color=discord.Color.green())
@@ -516,6 +511,7 @@ async def sendplaysettings(ctx, event_name: str):
         embed.add_field(name="Same Nickname Limit", value=f"{event_nickname_limit[event_name]} times", inline=False)
     await ctx.send(embed=embed)
 
+# !getplayexcel command – Sends the Excel file for the event.
 @bot.command(name="getplayexcel")
 async def getplayexcel(ctx, event_name: str):
     if not is_play_authorized(ctx):
@@ -523,9 +519,89 @@ async def getplayexcel(ctx, event_name: str):
         return
     file_name = f"{event_name}_play_records.xlsx"
     if not os.path.exists(file_name):
-        await ctx.send("Excel file not found.")
+        await ctx.send("Excel file not found for this event.")
         return
     await ctx.send(file=discord.File(file_name))
+
+# !deletesendplay command – Deletes the event and clears usage_counts and event_nickname_counts.
+@bot.command(name="deletesendplay")
+async def deletesendplay(ctx, event_name: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Specified event not found.")
+        return
+    info = events.pop(event_name)
+    
+    # Clear event_nickname_counts for the event
+    if event_name in event_nickname_counts:
+        event_nickname_counts.pop(event_name)
+    
+    # Clear all usage_counts entries that start with the event_name
+    keys_to_remove = [key for key in usage_counts if key[0] == event_name]
+    for key in keys_to_remove:
+        usage_counts.pop(key)
+    
+    channel = ctx.guild.get_channel(info.get("channel_id"))
+    if channel:
+        try:
+            msg = await channel.fetch_message(info["message_id"])
+            await msg.delete()
+        except Exception:
+            await ctx.send("Failed to delete event message.")
+    
+    file_name = info.get("excel_file")
+    if file_name and os.path.exists(file_name):
+        os.remove(file_name)
+        await ctx.send(f"{event_name} event and Excel file deleted.")
+    else:
+        await ctx.send(f"{event_name} event deleted, but Excel file not found.")
+
+# !playlistid command – Instead of sending multiple messages with numbering,
+# this command gathers unique participant IDs and writes them to a text file.
+# In the text file, IDs are displayed side by side (separated by spaces), and every 150 IDs start a new paragraph.
+@bot.command(name="playlistid")
+async def playlistid(ctx, event_name: str):
+    excel_file_name = f"{event_name}_play_records.xlsx"
+    if not os.path.exists(excel_file_name):
+        await ctx.send("Excel file for the specified event not found.")
+        return
+
+    try:
+        workbook = openpyxl.load_workbook(excel_file_name)
+        sheet = workbook.active
+    except Exception as e:
+        await ctx.send("Error reading the Excel file.")
+        return
+
+    discord_ids = []
+    # Skip the header row; read Discord IDs starting from row 2.
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        discord_ids.append(str(row[0]))
+    # Remove duplicate IDs while preserving order.
+    unique_ids = list(dict.fromkeys(discord_ids))
+    if not unique_ids:
+        await ctx.send("No participants found for the event.")
+        return
+
+    chunk_size = 150
+    paragraphs = []
+    for i in range(0, len(unique_ids), chunk_size):
+        chunk = unique_ids[i:i+chunk_size]
+        # Join IDs with a space (displayed side by side).
+        paragraph = " ".join(chunk)
+        paragraphs.append(paragraph)
+
+    # Join paragraphs with two newlines (each chunk in a new paragraph).
+    txt_content = "\n\n".join(paragraphs)
+
+    output_file_name = f"{event_name}_playlist.txt"
+    with open(output_file_name, "w", encoding="utf-8") as f:
+        f.write(txt_content)
+
+    # Send the text file as an attachment.
+    await ctx.send(file=discord.File(output_file_name))
 
 @bot.command(name="allplaylist")
 async def allplaylist(ctx):
@@ -536,32 +612,7 @@ async def allplaylist(ctx):
         await ctx.send("No events found.")
         return
     event_names = "\n".join(events.keys())
-    await ctx.send(f"List of created events:\n{event_names}")
-
-@bot.command(name="deletesendplay")
-async def deletesendplay(ctx, event_name: str):
-    if not is_play_authorized(ctx):
-        await ctx.message.delete()
-        return
-    if event_name not in events:
-        await ctx.send("The specified event was not found.")
-        return
-    info = events.pop(event_name)
-    if event_name in event_nickname_counts:
-        event_nickname_counts.pop(event_name)
-    channel = ctx.guild.get_channel(info.get("channel_id"))
-    if channel:
-        try:
-            msg = await channel.fetch_message(info["message_id"])
-            await msg.delete()
-        except Exception:
-            await ctx.send("Failed to delete event message.")
-    file_name = info.get("excel_file")
-    if file_name and os.path.exists(file_name):
-        os.remove(file_name)
-        await ctx.send(f"{event_name} event and Excel file deleted.")
-    else:
-        await ctx.send(f"{event_name} event deleted, Excel file not found.")
+    await ctx.send(f"Created events:\n{event_names}")
 
 @bot.command(name="playhelp")
 async def playhelp(ctx):
@@ -572,54 +623,41 @@ async def playhelp(ctx):
         title="Play Bot Help Menu - Detailed Guide",
         description=(
             "**Event Creation and Settings Management**\n"
-            "With this bot, you can create different events (e.g., tournaments, competitions, etc.) in your server, "
-            "set event-specific links, channels, interaction limits, same nickname limits, and maintain a record Excel file.\n\n"
+            "With this bot, you can create various events (tournaments, competitions, etc.) in your server, "
+            "set event-specific links, channels, interaction limits, same nickname limits, and maintain an Excel file.\n\n"
             "**Commands and Example Usage:**\n\n"
-            "1. **!createplayevent <eventname>**\n"
+            "1. **!createplayevent <event_name>**\n"
             "   - Description: Creates a new event.\n"
             "   - Example: `!createplayevent Tournament2025`\n\n"
-            "2. **!setplaylink <eventname> <link>**\n"
-            "   - Description: Sets the link to be sent for the event.\n"
+            "2. **!setplaylink <event_name> <link>**\n"
+            "   - Description: Sets the link for the event.\n"
             "   - Example: `!setplaylink Tournament2025 https://example.com/tournament`\n\n"
-            "3. **!setplaychannel <eventname> <channelid>**\n"
-            "   - Description: Sets the channel where the event's button will be sent.\n"
-            "   - Example: `!setplaychannel Tournament2025 123456789012345678` or `!setplaychannel Tournament2025 <#123456789012345678>`\n\n"
+            "3. **!setplaychannel <event_name> <channelID or #channel>**\n"
+            "   - Description: Sets the channel where the event's button will be sent.\n\n"
             "4. **!setauthorizedrole <roleID or @role>**\n"
-            "   - Description: Sets the base authorized role for using play event commands.\n"
-            "   - Example: `!setauthorizedrole 987654321098765432` or `!setauthorizedrole <@&987654321098765432>`\n\n"
+            "   - Description: Sets the authorized role for play event commands.\n\n"
             "5. **!setallowedrole <roleID1,roleID2,...>**\n"
-            "   - Description: Specifies which roles are allowed to use the button.\n"
-            "   - Example: `!setallowedrole 112233445566778899,223344556677889900`\n\n"
+            "   - Description: Specifies roles allowed to use the button.\n\n"
             "6. **!removeallowedrole <roleID1,roleID2,...>**\n"
-            "   - Description: Removes the specified allowed roles.\n"
-            "   - Example: `!removeallowedrole 112233445566778899`\n\n"
-            "7. **!samenicknamefilter <eventname> on <limit> / off**\n"
-            "   - Description: Sets the maximum number of times the same in-game username can be entered in the specified event.\n"
-            "   - Example: `!samenicknamefilter Tournament2025 on 1` → In this event, each username can only be entered once.\n"
-            "             `!samenicknamefilter Tournament2025 on 2` → The same username can be entered twice.\n"
-            "             `!samenicknamefilter Tournament2025 off` → Filter disabled, users can enter the same username unlimited times.\n\n"
-            "8. **!sendplay <eventname> [channelid]**\n"
-            "   - Description: Sends a 'Play' message with a button for the event. If the event's channel is not set, it can be updated with a provided channel ID.\n"
-            "   - Example: `!sendplay Tournament2025 <#123456789012345678>` or `!sendplay Tournament2025`\n\n"
-            "9. **!sendplaylimit <eventname> <roleID or @role> <limit>**\n"
-            "   - Description: Sets the interaction limit for users with the specified role for the event.\n"
-            "   - Example: `!sendplaylimit Tournament2025 <@&112233445566778899> 3`\n\n"
-            "10. **!sendplaysettings <eventname>**\n"
-            "    - Description: Shows all settings for the event (link, channel, limits, same nickname limit, Excel file) in detail.\n"
-            "    - Example: `!sendplaysettings Tournament2025`\n\n"
-            "11. **!getplayexcel <eventname>**\n"
-            "    - Description: Sends the Excel file where the event records are maintained.\n"
-            "    - Example: `!getplayexcel Tournament2025`\n\n"
-            "12. **!allplaylist**\n"
-            "    - Description: Lists all created event names.\n"
-            "    - Example: `!allplaylist`\n\n"
-            "13. **!deletesendplay <eventname>**\n"
-            "    - Description: Deletes the specified event and its associated Excel file.\n"
-            "    - Example: `!deletesendplay Tournament2025`\n\n"
-            "14. **!securityauthorizedremove <id>** / **!playauthorizedremove <id>**\n"
-            "    - Description: Removes the provided user or role ID from the security or play authorized list.\n"
-            "    - Example: `!securityauthorizedremove <@&123456789012345678>` or `!playauthorizedremove <@&123456789012345678>`\n\n"
-            "Note: All these commands can only be used by authorized users. Unauthorized users will have their command messages automatically deleted."
+            "   - Description: Removes the specified roles from the allowed list.\n\n"
+            "7. **!samenicknamefilter <event_name> on <limit> / off**\n"
+            "   - Description: Limits the number of times the same in-game username can be entered.\n\n"
+            "8. **!sendplay <event_name> [channelID]**\n"
+            "   - Description: Sends the Play button for the event.\n\n"
+            "9. **!sendplaylimit <event_name> <roleID or @role> <limit>**\n"
+            "   - Description: Sets the interaction limit for the specified role for the event.\n\n"
+            "10. **!sendplaysettings <event_name>**\n"
+            "    - Description: Displays all event settings.\n\n"
+            "11. **!getplayexcel <event_name>**\n"
+            "    - Description: Sends the Excel file.\n\n"
+            "12. **!deletesendplay <event_name>**\n"
+            "    - Description: Deletes the event and associated files (usage data is cleared).\n\n"
+            "13. **!playlistid <event_name>**\n"
+            "    - Description: Lists Discord IDs of event participants in a text file. The IDs are listed side by side (separated by spaces), with each group of 150 IDs starting a new paragraph.\n\n"
+            "14. **!allplaylist**\n"
+            "    - Description: Lists all created events.\n\n"
+            "15. **!playhelp**\n"
+            "    - Description: Shows this help menu.\n"
         ),
         color=discord.Color.blue()
     )
