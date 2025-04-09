@@ -6,6 +6,7 @@ import asyncio
 from datetime import timedelta
 
 # Record function: Adds a record to the Excel file.
+# The discord_id is converted to a string to prevent scientific notation.
 def record_play(discord_id, discord_username, in_game_username, event_name):
     file_name = f"{event_name}_play_records.xlsx"
     if os.path.exists(file_name):
@@ -15,7 +16,8 @@ def record_play(discord_id, discord_username, in_game_username, event_name):
         workbook = openpyxl.Workbook()
         sheet = workbook.active
         sheet.append(["Discord ID", "Discord Username", "In-Game Username"])
-    sheet.append([discord_id, discord_username, in_game_username])
+    # Save the discord_id as a string.
+    sheet.append([str(discord_id), discord_username, in_game_username])
     workbook.save(file_name)
 
 # Intent settings
@@ -371,6 +373,37 @@ async def removeallowedrole(ctx, *, roles: str):
     else:
         await ctx.send("The specified roles were not found in the allowed list.")
 
+# New command: !removeplaybutton – Removes the Play button message for the specified event.
+@bot.command(name="removeplaybutton")
+async def removeplaybutton(ctx, event_name: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Specified event not found.")
+        return
+    info = events[event_name]
+    channel_id = info.get("channel_id")
+    if not channel_id:
+        await ctx.send("No channel information found for this event.")
+        return
+    channel = ctx.guild.get_channel(channel_id)
+    if not channel:
+        await ctx.send("Could not locate the channel for this event.")
+        return
+    msg_id = info.get("message_id")
+    if not msg_id:
+        await ctx.send("No play button message found for this event.")
+        return
+    try:
+        msg = await channel.fetch_message(msg_id)
+        await msg.delete()
+        # Optionally clear the stored message ID
+        events[event_name]["message_id"] = None
+        await ctx.send(f"Play button for {event_name} event has been removed.")
+    except Exception as e:
+        await ctx.send("Failed to remove play button.")
+
 # ---------------- Play Event Modal ----------------
 class PlayModal(discord.ui.Modal, title="Enter Your In-Game Username"):
     player = discord.ui.TextInput(
@@ -410,9 +443,10 @@ class PlayModal(discord.ui.Modal, title="Enter Your In-Game Username"):
 
 # ---------------- Play Event View ----------------
 class PlayView(discord.ui.View):
-    def __init__(self, event_name: str, *, timeout=180):
+    def __init__(self, event_name: str):
         self.event_name = event_name
-        super().__init__(timeout=timeout)
+        # Set timeout to None so that the view (and its button) never expires until the message is deleted.
+        super().__init__(timeout=None)
     @discord.ui.button(label="Play", style=discord.ButtonStyle.primary)
     async def play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         ev = events.get(self.event_name, {})
@@ -533,16 +567,13 @@ async def deletesendplay(ctx, event_name: str):
         await ctx.send("Specified event not found.")
         return
     info = events.pop(event_name)
-    
     # Clear event_nickname_counts for the event
     if event_name in event_nickname_counts:
         event_nickname_counts.pop(event_name)
-    
     # Clear all usage_counts entries that start with the event_name
     keys_to_remove = [key for key in usage_counts if key[0] == event_name]
     for key in keys_to_remove:
         usage_counts.pop(key)
-    
     channel = ctx.guild.get_channel(info.get("channel_id"))
     if channel:
         try:
@@ -550,7 +581,6 @@ async def deletesendplay(ctx, event_name: str):
             await msg.delete()
         except Exception:
             await ctx.send("Failed to delete event message.")
-    
     file_name = info.get("excel_file")
     if file_name and os.path.exists(file_name):
         os.remove(file_name)
@@ -558,48 +588,47 @@ async def deletesendplay(ctx, event_name: str):
     else:
         await ctx.send(f"{event_name} event deleted, but Excel file not found.")
 
-# !playlistid command – Instead of sending multiple messages with numbering,
-# this command gathers unique participant IDs and writes them to a text file.
-# In the text file, IDs are displayed side by side (separated by spaces), and every 150 IDs start a new paragraph.
+# !playlistid command – Gathers unique participant IDs from the Excel file and writes them to a text file.
+# In the file, the IDs are arranged side by side (separated by a space) with every 150 IDs starting a new paragraph.
 @bot.command(name="playlistid")
 async def playlistid(ctx, event_name: str):
     excel_file_name = f"{event_name}_play_records.xlsx"
     if not os.path.exists(excel_file_name):
         await ctx.send("Excel file for the specified event not found.")
         return
-
     try:
         workbook = openpyxl.load_workbook(excel_file_name)
         sheet = workbook.active
     except Exception as e:
         await ctx.send("Error reading the Excel file.")
         return
-
     discord_ids = []
     # Skip the header row; read Discord IDs starting from row 2.
     for row in sheet.iter_rows(min_row=2, values_only=True):
-        discord_ids.append(str(row[0]))
+        value = row[0]
+        # If the value is a float, convert it to an int and then to a string.
+        if isinstance(value, float):
+            value_str = str(int(value))
+        else:
+            value_str = str(value)
+        discord_ids.append(value_str)
     # Remove duplicate IDs while preserving order.
     unique_ids = list(dict.fromkeys(discord_ids))
     if not unique_ids:
         await ctx.send("No participants found for the event.")
         return
-
     chunk_size = 150
     paragraphs = []
     for i in range(0, len(unique_ids), chunk_size):
         chunk = unique_ids[i:i+chunk_size]
-        # Join IDs with a space (displayed side by side).
+        # Join IDs with a space.
         paragraph = " ".join(chunk)
         paragraphs.append(paragraph)
-
-    # Join paragraphs with two newlines (each chunk in a new paragraph).
+    # Each group of 150 IDs starts on a new paragraph (separated by two newlines).
     txt_content = "\n\n".join(paragraphs)
-
     output_file_name = f"{event_name}_playlist.txt"
     with open(output_file_name, "w", encoding="utf-8") as f:
         f.write(txt_content)
-
     # Send the text file as an attachment.
     await ctx.send(file=discord.File(output_file_name))
 
@@ -653,10 +682,12 @@ async def playhelp(ctx):
             "12. **!deletesendplay <event_name>**\n"
             "    - Description: Deletes the event and associated files (usage data is cleared).\n\n"
             "13. **!playlistid <event_name>**\n"
-            "    - Description: Lists Discord IDs of event participants in a text file. The IDs are listed side by side (separated by spaces), with each group of 150 IDs starting a new paragraph.\n\n"
-            "14. **!allplaylist**\n"
+            "    - Description: Lists Discord IDs of event participants in a text file. The IDs are arranged side by side (separated by spaces), with every 150 IDs starting a new paragraph.\n\n"
+            "14. **!removeplaybutton <event_name>**\n"
+            "    - Description: Removes the Play button for the specified event.\n\n"
+            "15. **!allplaylist**\n"
             "    - Description: Lists all created events.\n\n"
-            "15. **!playhelp**\n"
+            "16. **!playhelp**\n"
             "    - Description: Shows this help menu.\n"
         ),
         color=discord.Color.blue()
