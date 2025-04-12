@@ -5,19 +5,36 @@ import os
 import asyncio
 from datetime import timedelta
 
-# Record function: Adds a record to the Excel file.
+# Record function: Adds or updates a record in the Excel file.
 # The discord_id is converted to a string to prevent scientific notation.
 def record_play(discord_id, discord_username, in_game_username, event_name):
     file_name = f"{event_name}_play_records.xlsx"
     if os.path.exists(file_name):
         workbook = openpyxl.load_workbook(file_name)
         sheet = workbook.active
+        
+        # Check if user already exists in the sheet
+        user_row = None
+        for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            if str(row[0]) == str(discord_id):
+                user_row = row_idx
+                break
+        
+        if user_row:
+            # Update existing record
+            sheet.cell(row=user_row, column=1, value=str(discord_id))
+            sheet.cell(row=user_row, column=2, value=discord_username)
+            sheet.cell(row=user_row, column=3, value=in_game_username)
+        else:
+            # Add new record
+            sheet.append([str(discord_id), discord_username, in_game_username])
     else:
         workbook = openpyxl.Workbook()
         sheet = workbook.active
         sheet.append(["Discord ID", "Discord Username", "In-Game Username"])
-    # Save the discord_id as a string.
-    sheet.append([str(discord_id), discord_username, in_game_username])
+        # Save the discord_id as a string.
+        sheet.append([str(discord_id), discord_username, in_game_username])
+    
     workbook.save(file_name)
 
 # Intent settings
@@ -382,122 +399,95 @@ async def removeplaybutton(ctx, event_name: str):
     if event_name not in events:
         await ctx.send("Specified event not found.")
         return
-    info = events[event_name]
-    channel_id = info.get("channel_id")
-    if not channel_id:
-        await ctx.send("No channel information found for this event.")
+    if "message_id" not in events[event_name] or "channel_id" not in events[event_name]:
+        await ctx.send("No button message found for this event.")
         return
-    channel = ctx.guild.get_channel(channel_id)
-    if not channel:
-        await ctx.send("Could not locate the channel for this event.")
-        return
-    msg_id = info.get("message_id")
-    if not msg_id:
-        await ctx.send("No play button message found for this event.")
+    channel = ctx.guild.get_channel(events[event_name]["channel_id"])
+    if channel is None:
+        await ctx.send("Channel not found.")
         return
     try:
-        msg = await channel.fetch_message(msg_id)
+        msg = await channel.fetch_message(events[event_name]["message_id"])
         await msg.delete()
-        # Optionally clear the stored message ID
-        events[event_name]["message_id"] = None
         await ctx.send(f"Play button for {event_name} event has been removed.")
     except Exception as e:
-        await ctx.send("Failed to remove play button.")
-
-# ---------------- Play Event Modal ----------------
-class PlayModal(discord.ui.Modal, title="Enter Your In-Game Username"):
-    player = discord.ui.TextInput(
-        label="In-Game Username",
-        placeholder="Enter your in-game username",
-        required=True
-    )
-    def __init__(self, event_name: str, *args, **kwargs):
-        self.event_name = event_name
-        self.processed = False  # Flag to prevent double submission
-        super().__init__(*args, **kwargs)
-    async def on_submit(self, interaction: discord.Interaction):
-        if self.processed:
-            return
-        self.processed = True
-        nickname = self.player.value.strip()
-        if not nickname:
-            await interaction.response.send_message("Please enter a valid username.", ephemeral=True)
-            return
-        # Check same nickname limit
-        if self.event_name in event_nickname_limit:
-            limit = event_nickname_limit[self.event_name]
-            if self.event_name not in event_nickname_counts:
-                event_nickname_counts[self.event_name] = {}
-            count = event_nickname_counts[self.event_name].get(nickname, 0)
-            if count >= limit:
-                await interaction.response.send_message("You have reached the limit for this username, please try a different one.", ephemeral=True)
-                return
-            event_nickname_counts[self.event_name][nickname] = count + 1
-        # Record to Excel file in a separate thread to avoid blocking
-        asyncio.create_task(asyncio.to_thread(record_play, interaction.user.id, interaction.user.name, nickname, self.event_name))
-        key = (self.event_name, interaction.user.id)
-        usage_counts[key] = usage_counts.get(key, 0) + 1
-        ev = events.get(self.event_name, {})
-        link = ev.get("link", "Link not set")
-        await interaction.response.send_message(f"Hello {nickname}, here is the link: {link}", ephemeral=True)
-
-# ---------------- Play Event View ----------------
-class PlayView(discord.ui.View):
-    def __init__(self, event_name: str):
-        self.event_name = event_name
-        # Set timeout to None so that the view (and its button) never expires until the message is deleted.
-        super().__init__(timeout=None)
-    @discord.ui.button(label="Play", style=discord.ButtonStyle.primary)
-    async def play_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        ev = events.get(self.event_name, {})
-        if ev.get("channel_id") and interaction.channel.id != ev["channel_id"]:
-            await interaction.response.send_message("This button cannot be used in this channel.", ephemeral=True)
-            return
-        if allowed_role_ids:
-            user_role_ids = [role.id for role in interaction.user.roles]
-            if not any(role_id in user_role_ids for role_id in allowed_role_ids):
-                await interaction.response.send_message("You are not authorized to use this button.", ephemeral=True)
-                return
-        if "limits" in ev and ev["limits"]:
-            limits = ev["limits"]
-            user_role_ids = [role.id for role in interaction.user.roles]
-            applicable_limits = [limits[rid] for rid in limits if rid in user_role_ids]
-            if applicable_limits:
-                min_limit = min(applicable_limits)
-                key = (self.event_name, interaction.user.id)
-                current = usage_counts.get(key, 0)
-                if current >= min_limit:
-                    await interaction.response.send_message("You have reached your interaction limit.", ephemeral=True)
-                    return
-        await interaction.response.send_modal(PlayModal(self.event_name))
+        await ctx.send(f"Failed to remove button: {e}")
 
 @bot.command(name="sendplay")
-async def sendplay(ctx, event_name: str, channel_id_input: str = None):
+async def sendplay(ctx, event_name: str, channel_input: str = None):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
         return
     if event_name not in events:
-        await ctx.send("Event not found. Please create it first with !createplayevent.")
+        await ctx.send("Please create the event first using !createplayevent.")
         return
-    if channel_id_input:
+    if channel_input:
         try:
-            channel_id = int(channel_id_input.strip("<#>"))
+            channel_id = int(channel_input.strip("<#>"))
         except ValueError:
-            await ctx.send("Please provide a valid channel ID.")
+            await ctx.send("Please provide a valid channel ID or channel mention.")
             return
         channel = ctx.guild.get_channel(channel_id)
-        if channel is None:
-            await ctx.send("No channel found with the provided ID.")
-            return
-        events[event_name]["channel_id"] = channel.id
     else:
-        if not events[event_name].get("channel_id"):
-            await ctx.send("No event-specific channel set. Please use !setplaychannel or provide a channel ID.")
+        if events[event_name]["channel_id"] is None:
+            await ctx.send("No channel set for this event. Please use !setplaychannel or provide a channel.")
             return
-        channel_id = events[event_name]["channel_id"]
-        channel = ctx.guild.get_channel(channel_id)
-    msg = await channel.send(f"Play button for {event_name} event:", view=PlayView(event_name))
-    events[event_name]["message_id"] = msg.id
+        channel = ctx.guild.get_channel(events[event_name]["channel_id"])
+    if channel is None:
+        await ctx.send("Channel not found.")
+        return
+    if events[event_name]["link"] is None:
+        await ctx.send("No link set for this event. Please use !setplaylink first.")
+        return
+    view = discord.ui.View()
+    button = discord.ui.Button(label="Play", style=discord.ButtonStyle.green)
+    async def button_callback(interaction):
+        user = interaction.user
+        user_roles = [role.id for role in user.roles]
+        if not any(role_id in allowed_role_ids for role_id in user_roles):
+            await interaction.response.send_message("You don't have permission to use this button.", ephemeral=True)
+            return
+        key = (event_name, user.id)
+        if key in usage_counts:
+            usage_counts[key] += 1
+        else:
+            usage_counts[key] = 1
+        limit_exceeded = False
+        for role_id, limit in events[event_name].get("limits", {}).items():
+            if role_id in user_roles and usage_counts[key] > limit:
+                limit_exceeded = True
+                break
+        if limit_exceeded:
+            await interaction.response.send_message(f"You've reached your interaction limit for {event_name}.", ephemeral=True)
+            return
+        modal = discord.ui.Modal(title=f"Enter your in-game username for {event_name}")
+        username_input = discord.ui.TextInput(
+            label="In-Game Username",
+            placeholder="Enter your in-game username here...",
+            required=True
+        )
+        modal.add_item(username_input)
+        async def modal_submit(modal_interaction):
+            in_game_username = username_input.value
+            if event_name in event_nickname_limit:
+                limit = event_nickname_limit[event_name]
+                if event_name not in event_nickname_counts:
+                    event_nickname_counts[event_name] = {}
+                if in_game_username in event_nickname_counts[event_name]:
+                    event_nickname_counts[event_name][in_game_username] += 1
+                else:
+                    event_nickname_counts[event_name][in_game_username] = 1
+                if event_nickname_counts[event_name][in_game_username] > limit:
+                    await modal_interaction.response.send_message(f"The in-game username '{in_game_username}' has reached its limit for {event_name}.", ephemeral=True)
+                    return
+            record_play(user.id, user.name, in_game_username, event_name)
+            await modal_interaction.response.send_message(f"Your in-game username '{in_game_username}' has been recorded for {event_name}. You can now access the event at {events[event_name]['link']}", ephemeral=True)
+        modal.on_submit = modal_submit
+        await interaction.response.send_modal(modal)
+    button.callback = button_callback
+    view.add_item(button)
+    message = await channel.send(f"Click the button below to participate in {event_name}:", view=view)
+    events[event_name]["message_id"] = message.id
     await ctx.send(f"{event_name} event created. Button sent to {channel.mention} channel.")
 
 @bot.command(name="sendplaylimit")
@@ -632,6 +622,82 @@ async def playlistid(ctx, event_name: str):
     # Send the text file as an attachment.
     await ctx.send(file=discord.File(output_file_name))
 
+# Updated command: !checkgameusername - Checks if game usernames match with Discord IDs
+# Now supports "id" parameter to output only Discord IDs
+@bot.command(name="checkgameusername")
+async def checkgameusername(ctx, first_param: str, event_name: str = None, *, usernames: str = None):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    
+    # Check if the first parameter is "id"
+    id_only_mode = False
+    if first_param.lower() == "id":
+        id_only_mode = True
+        if event_name is None or usernames is None:
+            await ctx.send("Usage: !checkgameusername id <event_name> <username1 username2 ...>")
+            return
+    else:
+        # If first parameter is not "id", then it's the event_name
+        if usernames is None:
+            usernames = event_name
+            event_name = first_param
+    
+    excel_file_name = f"{event_name}_play_records.xlsx"
+    if not os.path.exists(excel_file_name):
+        await ctx.send("Excel file for the specified event not found.")
+        return
+    
+    try:
+        workbook = openpyxl.load_workbook(excel_file_name)
+        sheet = workbook.active
+    except Exception as e:
+        await ctx.send(f"Error reading the Excel file: {e}")
+        return
+    
+    # Parse the usernames from the input
+    username_list = [name.strip() for name in usernames.split()]
+    
+    # Create a dictionary to store in-game username to Discord ID mappings
+    username_to_discord = {}
+    
+    # Read the Excel file and populate the dictionary
+    for row in sheet.iter_rows(min_row=2, values_only=True):
+        discord_id = str(row[0])
+        in_game_username = row[2]
+        username_to_discord[in_game_username] = discord_id
+    
+    # Find matches
+    matches = []
+    for username in username_list:
+        if username in username_to_discord:
+            matches.append((username, username_to_discord[username]))
+    
+    # Create result message
+    result_message = f"Checked {len(username_list)} game usernames for event '{event_name}'.\n"
+    result_message += f"Found {len(matches)} matching Discord IDs."
+    
+    # Create a text file with the results
+    output_file_name = f"{event_name}_username_matches.txt"
+    with open(output_file_name, "w", encoding="utf-8") as f:
+        f.write(f"Event: {event_name}\n")
+        f.write(f"Total usernames checked: {len(username_list)}\n")
+        f.write(f"Total matches found: {len(matches)}\n\n")
+        
+        if id_only_mode:
+            # In ID-only mode, just list the Discord IDs
+            f.write("Discord IDs:\n")
+            for _, discord_id in matches:
+                f.write(f"{discord_id}\n")
+        else:
+            # In normal mode, list both username and Discord ID
+            f.write("Matches (Game Username : Discord ID):\n")
+            for username, discord_id in matches:
+                f.write(f"{username} : {discord_id}\n")
+    
+    # Send the results
+    await ctx.send(result_message, file=discord.File(output_file_name))
+
 @bot.command(name="allplaylist")
 async def allplaylist(ctx):
     if not is_play_authorized(ctx):
@@ -687,7 +753,13 @@ async def playhelp(ctx):
             "    - Description: Removes the Play button for the specified event.\n\n"
             "15. **!allplaylist**\n"
             "    - Description: Lists all created events.\n\n"
-            "16. **!playhelp**\n"
+            "16. **!checkgameusername <event_name> <username1 username2 ...>**\n"
+            "    - Description: Checks if the provided game usernames match with Discord IDs in the event records.\n"
+            "    - Example: `!checkgameusername Tournament2025 Player1 Player2 Player3`\n\n"
+            "17. **!checkgameusername id <event_name> <username1 username2 ...>**\n"
+            "    - Description: Same as above, but outputs only the Discord IDs in the text file.\n"
+            "    - Example: `!checkgameusername id Tournament2025 Player1 Player2 Player3`\n\n"
+            "18. **!playhelp**\n"
             "    - Description: Shows this help menu.\n"
         ),
         color=discord.Color.blue()
