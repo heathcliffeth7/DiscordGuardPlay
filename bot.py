@@ -4,6 +4,7 @@ import openpyxl
 import os
 import asyncio
 from datetime import timedelta
+from playwright.async_api import async_playwright
 
 # Record function: Adds or updates a record in the Excel file.
 # The discord_id is converted to a string to prevent scientific notation.
@@ -386,127 +387,58 @@ async def removeallowedrole(ctx, *, roles: str):
         except ValueError:
             continue
     if removed:
-        await ctx.send(f"Removed roles: {removed}")
+        await ctx.send(f"Removed roles from allowed list: {removed}")
     else:
-        await ctx.send("The specified roles were not found in the allowed list.")
+        await ctx.send("No roles were removed from the allowed list.")
 
-# New command: !removeplaybutton – Removes the Play button message for the specified event.
-@bot.command(name="removeplaybutton")
-async def removeplaybutton(ctx, event_name: str):
+@bot.command(name="playauthorizedadd")
+async def playauthorizedadd(ctx, identifier: str):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
-        return
-    if event_name not in events:
-        await ctx.send("Specified event not found.")
-        return
-    if "message_id" not in events[event_name] or "channel_id" not in events[event_name]:
-        await ctx.send("No button message found for this event.")
-        return
-    channel = ctx.guild.get_channel(events[event_name]["channel_id"])
-    if channel is None:
-        await ctx.send("Channel not found.")
         return
     try:
-        msg = await channel.fetch_message(events[event_name]["message_id"])
-        await msg.delete()
-        await ctx.send(f"Play button for {event_name} event has been removed.")
-    except Exception as e:
-        await ctx.send(f"Failed to remove button: {e}")
+        id_val = int(identifier.strip("<@&>"))
+    except ValueError:
+        await ctx.send("Please provide a valid user or role ID.")
+        return
+    play_authorized_ids.add(id_val)
+    await ctx.send(f"{identifier} is now authorized for play event commands.")
 
-@bot.command(name="sendplay")
-async def sendplay(ctx, event_name: str, channel_input: str = None):
+@bot.command(name="playauthorizedremove")
+async def playauthorizedremove(ctx, identifier: str):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
         return
-    if event_name not in events:
-        await ctx.send("Please create the event first using !createplayevent.")
+    try:
+        id_val = int(identifier.strip("<@&>"))
+    except ValueError:
+        await ctx.send("Please provide a valid user or role ID.")
         return
-    if channel_input:
-        try:
-            channel_id = int(channel_input.strip("<#>"))
-        except ValueError:
-            await ctx.send("Please provide a valid channel ID or channel mention.")
-            return
-        channel = ctx.guild.get_channel(channel_id)
+    if id_val in play_authorized_ids:
+        play_authorized_ids.remove(id_val)
+        await ctx.send(f"{identifier} has been removed from the play authorized list.")
     else:
-        if events[event_name]["channel_id"] is None:
-            await ctx.send("No channel set for this event. Please use !setplaychannel or provide a channel.")
-            return
-        channel = ctx.guild.get_channel(events[event_name]["channel_id"])
-    if channel is None:
-        await ctx.send("Channel not found.")
-        return
-    if events[event_name]["link"] is None:
-        await ctx.send("No link set for this event. Please use !setplaylink first.")
-        return
-    view = discord.ui.View()
-    button = discord.ui.Button(label="Play", style=discord.ButtonStyle.green)
-    async def button_callback(interaction):
-        user = interaction.user
-        user_roles = [role.id for role in user.roles]
-        if not any(role_id in allowed_role_ids for role_id in user_roles):
-            await interaction.response.send_message("You don't have permission to use this button.", ephemeral=True)
-            return
-        key = (event_name, user.id)
-        if key in usage_counts:
-            usage_counts[key] += 1
-        else:
-            usage_counts[key] = 1
-        limit_exceeded = False
-        for role_id, limit in events[event_name].get("limits", {}).items():
-            if role_id in user_roles and usage_counts[key] > limit:
-                limit_exceeded = True
-                break
-        if limit_exceeded:
-            await interaction.response.send_message(f"You've reached your interaction limit for {event_name}.", ephemeral=True)
-            return
-        modal = discord.ui.Modal(title=f"Enter your in-game username for {event_name}")
-        username_input = discord.ui.TextInput(
-            label="In-Game Username",
-            placeholder="Enter your in-game username here...",
-            required=True
-        )
-        modal.add_item(username_input)
-        async def modal_submit(modal_interaction):
-            in_game_username = username_input.value
-            if event_name in event_nickname_limit:
-                limit = event_nickname_limit[event_name]
-                if event_name not in event_nickname_counts:
-                    event_nickname_counts[event_name] = {}
-                if in_game_username in event_nickname_counts[event_name]:
-                    event_nickname_counts[event_name][in_game_username] += 1
-                else:
-                    event_nickname_counts[event_name][in_game_username] = 1
-                if event_nickname_counts[event_name][in_game_username] > limit:
-                    await modal_interaction.response.send_message(f"The in-game username '{in_game_username}' has reached its limit for {event_name}.", ephemeral=True)
-                    return
-            record_play(user.id, user.name, in_game_username, event_name)
-            await modal_interaction.response.send_message(f"Your in-game username '{in_game_username}' has been recorded for {event_name}. You can now access the event at {events[event_name]['link']}", ephemeral=True)
-        modal.on_submit = modal_submit
-        await interaction.response.send_modal(modal)
-    button.callback = button_callback
-    view.add_item(button)
-    message = await channel.send(f"Click the button below to participate in {event_name}:", view=view)
-    events[event_name]["message_id"] = message.id
-    await ctx.send(f"{event_name} event created. Button sent to {channel.mention} channel.")
+        await ctx.send("The specified ID was not found in the play authorized list.")
 
 @bot.command(name="sendplaylimit")
 async def sendplaylimit(ctx, event_name: str, role_input: str, limit: int):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
         return
+    if event_name not in events:
+        await ctx.send("Please create the event first using !createplayevent.")
+        return
     try:
         role_id = int(role_input.strip("<@&>"))
     except ValueError:
         await ctx.send("Please provide a valid role ID or role mention.")
         return
-    if event_name not in events:
-        await ctx.send("Specified event not found.")
+    role = ctx.guild.get_role(role_id)
+    if role is None:
+        await ctx.send("No role found with the provided ID.")
         return
-    if "limits" not in events[event_name]:
-        events[event_name]["limits"] = {}
-    events[event_name]["limits"][role_id] = limit
-    await ctx.send(f"Interaction limit for <@&{role_id}> set to {limit} for {event_name} event.")
+    events[event_name]["limits"][role.id] = limit
+    await ctx.send(f"Interaction limit for {role.mention} in {event_name} event set to {limit}.")
 
 @bot.command(name="sendplaysettings")
 async def sendplaysettings(ctx, event_name: str):
@@ -514,74 +446,62 @@ async def sendplaysettings(ctx, event_name: str):
         await ctx.message.delete()
         return
     if event_name not in events:
-        await ctx.send("Specified event not found.")
+        await ctx.send("Event not found.")
         return
-    ev = events[event_name]
-    embed = discord.Embed(title=f"{event_name} Event Settings", color=discord.Color.green())
-    embed.add_field(name="Link", value=ev.get("link", "Not set"), inline=False)
-    if ev.get("channel_id"):
-        channel = ctx.guild.get_channel(ev["channel_id"])
-        embed.add_field(name="Channel", value=channel.mention if channel else "Unknown", inline=False)
-    else:
-        embed.add_field(name="Channel", value="Not set", inline=False)
-    if ev.get("limits"):
-        limits_str = "\n".join([f"<@&{rid}>: {limit}" for rid, limit in ev["limits"].items()])
-    else:
-        limits_str = "Not set"
-    embed.add_field(name="Interaction Limits", value=limits_str, inline=False)
-    excel = ev.get("excel_file", "Not specified")
-    embed.add_field(name="Excel File", value=excel, inline=False)
-    if event_name in event_nickname_limit:
-        embed.add_field(name="Same Nickname Limit", value=f"{event_nickname_limit[event_name]} times", inline=False)
+    event_data = events[event_name]
+    embed = discord.Embed(title=f"{event_name} Event Settings", color=discord.Color.blue())
+    embed.add_field(name="Link", value=event_data["link"] or "Not set", inline=False)
+    channel_id = event_data["channel_id"]
+    channel_mention = f"<#{channel_id}>" if channel_id else "Not set"
+    embed.add_field(name="Channel", value=channel_mention, inline=False)
+    embed.add_field(name="Excel File", value=event_data["excel_file"], inline=False)
+    limits_text = ""
+    for role_id, limit in event_data["limits"].items():
+        role = ctx.guild.get_role(role_id)
+        role_name = role.name if role else f"Unknown Role ({role_id})"
+        limits_text += f"{role_name}: {limit}\n"
+    embed.add_field(name="Interaction Limits", value=limits_text or "No limits set", inline=False)
+    same_nickname_limit_text = str(event_nickname_limit.get(event_name, "No limit")) if event_name in event_nickname_limit else "No limit"
+    embed.add_field(name="Same Nickname Limit", value=same_nickname_limit_text, inline=False)
     await ctx.send(embed=embed)
 
-# !getplayexcel command – Sends the Excel file for the event.
 @bot.command(name="getplayexcel")
 async def getplayexcel(ctx, event_name: str):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
         return
-    file_name = f"{event_name}_play_records.xlsx"
-    if not os.path.exists(file_name):
-        await ctx.send("Excel file not found for this event.")
+    excel_file_name = f"{event_name}_play_records.xlsx"
+    if not os.path.exists(excel_file_name):
+        await ctx.send("Excel file for the specified event not found.")
         return
-    await ctx.send(file=discord.File(file_name))
+    await ctx.send(file=discord.File(excel_file_name))
 
-# !deletesendplay command – Deletes the event and clears usage_counts and event_nickname_counts.
 @bot.command(name="deletesendplay")
 async def deletesendplay(ctx, event_name: str):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
         return
     if event_name not in events:
-        await ctx.send("Specified event not found.")
+        await ctx.send("Event not found.")
         return
-    info = events.pop(event_name)
-    # Clear event_nickname_counts for the event
-    if event_name in event_nickname_counts:
-        event_nickname_counts.pop(event_name)
-    # Clear all usage_counts entries that start with the event_name
-    keys_to_remove = [key for key in usage_counts if key[0] == event_name]
-    for key in keys_to_remove:
-        usage_counts.pop(key)
-    channel = ctx.guild.get_channel(info.get("channel_id"))
-    if channel:
+    events.pop(event_name)
+    event_nickname_counts.pop(event_name, None)
+    event_nickname_limit.pop(event_name, None)
+    excel_file_name = f"{event_name}_play_records.xlsx"
+    if os.path.exists(excel_file_name):
         try:
-            msg = await channel.fetch_message(info["message_id"])
-            await msg.delete()
-        except Exception:
-            await ctx.send("Failed to delete event message.")
-    file_name = info.get("excel_file")
-    if file_name and os.path.exists(file_name):
-        os.remove(file_name)
-        await ctx.send(f"{event_name} event and Excel file deleted.")
+            os.remove(excel_file_name)
+            await ctx.send(f"{event_name} event and its Excel file have been deleted.")
+        except Exception as e:
+            await ctx.send(f"Event deleted, but could not delete Excel file: {e}")
     else:
-        await ctx.send(f"{event_name} event deleted, but Excel file not found.")
+        await ctx.send(f"{event_name} event has been deleted. No Excel file was found.")
 
-# !playlistid command – Gathers unique participant IDs from the Excel file and writes them to a text file.
-# In the file, the IDs are arranged side by side (separated by a space) with every 150 IDs starting a new paragraph.
 @bot.command(name="playlistid")
 async def playlistid(ctx, event_name: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
     excel_file_name = f"{event_name}_play_records.xlsx"
     if not os.path.exists(excel_file_name):
         await ctx.send("Excel file for the specified event not found.")
@@ -590,14 +510,14 @@ async def playlistid(ctx, event_name: str):
         workbook = openpyxl.load_workbook(excel_file_name)
         sheet = workbook.active
     except Exception as e:
-        await ctx.send("Error reading the Excel file.")
+        await ctx.send(f"Error reading the Excel file: {e}")
         return
     discord_ids = []
-    # Skip the header row; read Discord IDs starting from row 2.
     for row in sheet.iter_rows(min_row=2, values_only=True):
-        value = row[0]
-        # If the value is a float, convert it to an int and then to a string.
-        if isinstance(value, float):
+        value = row[0]  # Discord ID is in the first column
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
             value_str = str(int(value))
         else:
             value_str = str(value)
@@ -709,6 +629,379 @@ async def allplaylist(ctx):
     event_names = "\n".join(events.keys())
     await ctx.send(f"Created events:\n{event_names}")
 
+# Specialized command: !getusername - Optimized for Lepoker.io
+@bot.command(name="getusername")
+async def getusername(ctx, url: str, selector: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    
+    await ctx.send("Extracting player names from the Lepoker.io webpage. This may take a moment...")
+    
+    try:
+        # Extract player names using the specialized Lepoker.io function
+        player_names = await extract_lepoker_player_names(url, selector)
+        
+        if not player_names:
+            await ctx.send("No player names found on the webpage with the provided selector.")
+            return
+        
+        # Create a text file with the player names
+        output_file_name = "player_names.txt"
+        with open(output_file_name, "w", encoding="utf-8") as f:
+            for name in player_names:
+                f.write(f"{name}\n")
+        
+        # Send the results
+        await ctx.send(f"Found {len(player_names)} player names.", file=discord.File(output_file_name))
+    
+    except Exception as e:
+        # Truncate error message if it's too long to avoid Discord's 2000 character limit
+        error_msg = str(e)
+        if len(error_msg) > 1500:
+            error_msg = error_msg[:1500] + "... (error message truncated)"
+        
+        await ctx.send(f"Error extracting player names: {error_msg}")
+
+# Specialized function for Lepoker.io player extraction
+async def extract_lepoker_player_names(url, selector):
+    async with async_playwright() as p:
+        # Launch browser with optimized settings for Lepoker.io
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-dev-shm-usage',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-site-isolation-trials'
+            ]
+        )
+        
+        # Create context with larger viewport and mobile emulation (sometimes helps with lazy loading)
+        context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        )
+        
+        # Create a new page with longer timeouts
+        page = await context.new_page()
+        page.set_default_timeout(180000)  # 3 minutes timeout
+        
+        try:
+            print(f"Navigating to {url}")
+            # Navigate to the URL with a longer timeout and wait until network is idle
+            await page.goto(url, timeout=120000, wait_until="networkidle")
+            
+            # Wait for the page to be fully loaded
+            await page.wait_for_load_state("networkidle", timeout=60000)
+            await page.wait_for_timeout(5000)  # Additional 5 seconds wait
+            
+            # Check if we're on the correct page
+            print("Checking if we're on the correct page...")
+            page_title = await page.title()
+            print(f"Page title: {page_title}")
+            
+            # Set to store unique player names
+            player_names = set()
+            
+            # First try the provided selector
+            print(f"Trying provided selector: {selector}")
+            try:
+                count = await page.locator(selector).count()
+                print(f"Found {count} elements with provided selector")
+            except Exception as e:
+                print(f"Error with provided selector: {str(e)}")
+                count = 0
+            
+            # If the provided selector doesn't work well, try these Lepoker.io specific selectors
+            if count < 10:
+                print("Provided selector found few elements, trying Lepoker.io specific selectors")
+                lepoker_selectors = [
+                    "div.truncate",
+                    ".player-name",
+                    ".player-username",
+                    ".player-list div.truncate",
+                    "tr td div.truncate",
+                    "tr td:nth-child(2)",
+                    ".players-table tr td:nth-child(2)",
+                    ".players-list div.truncate"
+                ]
+                
+                for current_selector in lepoker_selectors:
+                    try:
+                        count = await page.locator(current_selector).count()
+                        if count > 0:
+                            print(f"Found {count} elements with selector: {current_selector}")
+                            selector = current_selector
+                            break
+                    except Exception:
+                        continue
+            
+            # Initial extraction
+            print("Performing initial extraction...")
+            try:
+                elements = await page.locator(selector).all()
+                for element in elements:
+                    try:
+                        text = await element.text_content()
+                        text = text.strip()
+                        if text and len(text) > 0:
+                            player_names.add(text)
+                    except Exception:
+                        continue
+            except Exception as e:
+                print(f"Error in initial extraction: {str(e)}")
+            
+            print(f"Initial extraction found {len(player_names)} players")
+            
+            # Specialized scrolling for Lepoker.io
+            print("Starting specialized scrolling for Lepoker.io...")
+            
+            # First, try to find and click any "Show All" or similar buttons
+            show_all_selectors = [
+                "button:has-text('Show All')",
+                "button:has-text('All Players')",
+                "button:has-text('View All')",
+                ".show-all-button",
+                ".view-all-button"
+            ]
+            
+            for show_selector in show_all_selectors:
+                try:
+                    if await page.locator(show_selector).count() > 0:
+                        print(f"Found 'Show All' button with selector: {show_selector}")
+                        await page.click(show_selector)
+                        await page.wait_for_timeout(5000)  # Wait for content to load
+                        break
+                except Exception:
+                    continue
+            
+            # Function to extract player names after each action
+            async def extract_names():
+                try:
+                    elements = await page.locator(selector).all()
+                    count_before = len(player_names)
+                    for element in elements:
+                        try:
+                            text = await element.text_content()
+                            text = text.strip()
+                            if text and len(text) > 0:
+                                player_names.add(text)
+                        except Exception:
+                            continue
+                    return len(player_names) - count_before
+                except Exception as e:
+                    print(f"Error in extract_names: {str(e)}")
+                    return 0
+            
+            # Specialized scrolling approach for Lepoker.io
+            # 1. First try continuous small scrolls
+            print("Performing continuous small scrolls...")
+            for i in range(50):
+                try:
+                    # Scroll down a small amount
+                    await page.evaluate(f"window.scrollBy(0, 300)")
+                    await page.wait_for_timeout(500)  # Short wait
+                    
+                    # Every 5 scrolls, check for new names
+                    if i % 5 == 0:
+                        new_names = await extract_names()
+                        print(f"Scroll group {i//5+1}: Found {new_names} new players, total: {len(player_names)}")
+                        
+                        # If we've found all 635 players or more, we can stop
+                        if len(player_names) >= 635:
+                            print(f"Found {len(player_names)} players, which is >= 635, stopping scrolling")
+                            break
+                except Exception as e:
+                    print(f"Error during small scroll {i+1}: {str(e)}")
+            
+            # 2. If we don't have enough players yet, try larger jumps
+            if len(player_names) < 635:
+                print("Trying larger scroll jumps...")
+                for i in range(20):
+                    try:
+                        # Larger scroll jump
+                        await page.evaluate(f"window.scrollBy(0, 1000)")
+                        await page.wait_for_timeout(1000)  # Longer wait
+                        
+                        new_names = await extract_names()
+                        print(f"Large scroll {i+1}: Found {new_names} new players, total: {len(player_names)}")
+                        
+                        # If we've found all 635 players or more, we can stop
+                        if len(player_names) >= 635:
+                            print(f"Found {len(player_names)} players, which is >= 635, stopping scrolling")
+                            break
+                    except Exception as e:
+                        print(f"Error during large scroll {i+1}: {str(e)}")
+            
+            # 3. If we still don't have enough, try scrolling to specific positions
+            if len(player_names) < 635:
+                print("Trying scrolling to specific positions...")
+                scroll_positions = [0.2, 0.4, 0.6, 0.8, 1.0]  # Percentage of page height
+                
+                for pos in scroll_positions:
+                    try:
+                        # Scroll to percentage of page height
+                        await page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {pos})")
+                        await page.wait_for_timeout(2000)  # Longer wait
+                        
+                        new_names = await extract_names()
+                        print(f"Position scroll {pos*100}%: Found {new_names} new players, total: {len(player_names)}")
+                    except Exception as e:
+                        print(f"Error during position scroll {pos*100}%: {str(e)}")
+            
+            # 4. Try clicking pagination elements if they exist
+            if len(player_names) < 635:
+                print("Looking for pagination elements...")
+                pagination_selectors = [
+                    ".pagination button",
+                    ".pagination a",
+                    "button.pagination-next",
+                    "a.pagination-next",
+                    ".next-page",
+                    "button:has-text('Next')",
+                    "a:has-text('Next')"
+                ]
+                
+                for pagination_selector in pagination_selectors:
+                    try:
+                        pagination_elements = await page.locator(pagination_selector).all()
+                        if len(pagination_elements) > 0:
+                            print(f"Found {len(pagination_elements)} pagination elements with selector: {pagination_selector}")
+                            
+                            # Click each pagination element
+                            for i, element in enumerate(pagination_elements):
+                                try:
+                                    await element.click()
+                                    await page.wait_for_timeout(2000)  # Wait for content to load
+                                    
+                                    new_names = await extract_names()
+                                    print(f"Pagination click {i+1}: Found {new_names} new players, total: {len(player_names)}")
+                                except Exception:
+                                    continue
+                            
+                            break
+                    except Exception:
+                        continue
+            
+            # 5. Try a specialized approach for Lepoker.io - force load all players with JavaScript
+            if len(player_names) < 635:
+                print("Trying specialized JavaScript approach for Lepoker.io...")
+                try:
+                    # This JavaScript tries to trigger the loading of all players
+                    await page.evaluate("""() => {
+                        // Try to find and click any "load more" buttons
+                        const buttons = Array.from(document.querySelectorAll('button'));
+                        for (const button of buttons) {
+                            if (button.textContent.toLowerCase().includes('more') || 
+                                button.textContent.toLowerCase().includes('all') ||
+                                button.textContent.toLowerCase().includes('show')) {
+                                button.click();
+                            }
+                        }
+                        
+                        // Scroll to various positions to trigger lazy loading
+                        const scrollPositions = [0.2, 0.4, 0.6, 0.8, 1.0];
+                        for (const pos of scrollPositions) {
+                            window.scrollTo(0, document.body.scrollHeight * pos);
+                        }
+                        
+                        // Try to find the player container and force display
+                        const containers = document.querySelectorAll('div');
+                        for (const container of containers) {
+                            if (container.querySelectorAll('div.truncate').length > 10) {
+                                container.style.maxHeight = 'none';
+                                container.style.overflow = 'visible';
+                            }
+                        }
+                    }""")
+                    
+                    await page.wait_for_timeout(3000)  # Wait for changes to take effect
+                    new_names = await extract_names()
+                    print(f"JavaScript approach: Found {new_names} new players, total: {len(player_names)}")
+                except Exception as e:
+                    print(f"Error in JavaScript approach: {str(e)}")
+            
+            # 6. Final extraction using JavaScript to get all elements
+            print("Performing final extraction with JavaScript...")
+            try:
+                # This JavaScript tries to extract all player names directly from the DOM
+                all_texts = await page.evaluate(f"""() => {{
+                    // Try the specified selector first
+                    let elements = Array.from(document.querySelectorAll('{selector}'));
+                    
+                    // If that doesn't work well, try other common selectors
+                    if (elements.length < 10) {{
+                        const selectors = [
+                            'div.truncate',
+                            '.player-name',
+                            '.player-username',
+                            '.player-list div.truncate',
+                            'tr td div.truncate',
+                            'tr td:nth-child(2)',
+                            '.players-table tr td:nth-child(2)',
+                            '.players-list div.truncate'
+                        ];
+                        
+                        for (const sel of selectors) {{
+                            const newElements = Array.from(document.querySelectorAll(sel));
+                            if (newElements.length > elements.length) {{
+                                elements = newElements;
+                            }}
+                        }}
+                    }}
+                    
+                    // Extract text content from elements
+                    return elements
+                        .map(el => el.textContent.trim())
+                        .filter(text => text.length > 0);
+                }}""")
+                
+                for text in all_texts:
+                    player_names.add(text)
+                
+                print(f"Final JavaScript extraction found {len(player_names)} total players")
+            except Exception as e:
+                print(f"Error in final JavaScript extraction: {str(e)}")
+            
+            # 7. Try one more approach - get all text content from the page and parse it
+            if len(player_names) < 635:
+                print("Trying to extract from full page content...")
+                try:
+                    full_page_text = await page.evaluate("""() => {
+                        return document.body.innerText;
+                    }""")
+                    
+                    # Split by newlines and process each line
+                    lines = full_page_text.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if line and len(line) > 0 and len(line) < 50:  # Likely a username if not too long
+                            player_names.add(line)
+                    
+                    print(f"Full page content extraction found {len(player_names)} total players")
+                except Exception as e:
+                    print(f"Error extracting from full page: {str(e)}")
+            
+            # Convert set back to list
+            result = list(player_names)
+            
+            # Filter out non-player entries
+            filtered_result = [
+                name for name in result 
+                if not name.isdigit() and 
+                name not in ["Players", "Rank", "Clan", "Chips", "Tables", "Finished", "-", "Name", "Player", "Username"] and
+                len(name) > 1  # Exclude single characters
+            ]
+            
+            print(f"Final result: {len(filtered_result)} players after filtering")
+            return filtered_result if filtered_result else result
+        
+        finally:
+            await browser.close()
+
 @bot.command(name="playhelp")
 async def playhelp(ctx):
     if not is_play_authorized(ctx):
@@ -759,7 +1052,10 @@ async def playhelp(ctx):
             "17. **!checkgameusername id <event_name> <username1 username2 ...>**\n"
             "    - Description: Same as above, but outputs only the Discord IDs in the text file.\n"
             "    - Example: `!checkgameusername id Tournament2025 Player1 Player2 Player3`\n\n"
-            "18. **!playhelp**\n"
+            "18. **!getusername <url> <selector>**\n"
+            "    - Description: Extracts player names from a webpage using the specified selector and saves them to a text file.\n"
+            "    - Example: `!getusername https://app.lepoker.io/m/lj2Dxdy/players \"div.truncate\"`\n\n"
+            "19. **!playhelp**\n"
             "    - Description: Shows this help menu.\n"
         ),
         color=discord.Color.blue()
