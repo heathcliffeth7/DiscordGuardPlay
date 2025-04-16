@@ -51,7 +51,7 @@ event_nickname_counts = {}
 event_nickname_limit = {}  # For same nickname limit
 
 # Security Authorization
-security_authorized_role_id = 123456    # Your security manager role ID
+security_authorized_role_id = 123456789   # Your security manager role ID
 security_authorized_ids = set()
 
 def is_security_authorized(ctx):
@@ -65,7 +65,7 @@ def is_security_authorized(ctx):
     return False
 
 # Play Event Authorization
-play_authorized_role_id = 123456  # Your event manager role ID
+play_authorized_role_id = 123456789  # Your event manager role ID
 play_authorized_ids = set()
 
 def is_play_authorized(ctx):
@@ -431,9 +431,24 @@ async def sendplay(ctx, event_name: str, channel_input: str = None):
             )
             self.add_item(self.nickname)
         
+       # Create the NicknameModal class
+    class NicknameModal(discord.ui.Modal, title=f"Register for {event_name}"):
+        def __init__(self, event_name, nickname_limit):
+            super().__init__()
+            self.event_name = event_name
+            self.nickname_limit = nickname_limit
+
+            self.nickname = discord.ui.TextInput(
+                label="Your In-Game Username",
+                placeholder="Enter your in-game username here...",
+                min_length=3,
+                max_length=32
+            )
+            self.add_item(self.nickname)
+
         async def on_submit(self, interaction: discord.Interaction):
             in_game_username = self.nickname.value.strip()
-            
+
             # Check same nickname limit if enabled
             if self.nickname_limit is not None:
                 if in_game_username in event_nickname_counts.get(self.event_name, {}):
@@ -443,24 +458,43 @@ async def sendplay(ctx, event_name: str, channel_input: str = None):
                             ephemeral=True
                         )
                         return
-                
+
                 # Update nickname count
                 if self.event_name not in event_nickname_counts:
                     event_nickname_counts[self.event_name] = {}
                 event_nickname_counts[self.event_name][in_game_username] = event_nickname_counts[self.event_name].get(in_game_username, 0) + 1
-            
+
             # Record the play
             record_play(interaction.user.id, str(interaction.user), in_game_username, self.event_name)
-            
+
             # Update usage count if limits are set
             if events[self.event_name]["limits"]:
                 usage_key = f"{self.event_name}_{interaction.user.id}"
                 usage_counts[usage_key] = usage_counts.get(usage_key, 0) + 1
-            
+
+            # Önceki onay mesajını gönder
             await interaction.response.send_message(
                 f"Successfully registered for {self.event_name} with username: {in_game_username}",
                 ephemeral=True
             )
+
+            # --- first ---
+            # Get Link
+            event_link = events[self.event_name].get("link") # .get() kullanarak link yoksa hata almayı önle
+
+            # Link varsa, kullanıcıya özel (ephemeral) olarak gönder
+            if event_link:
+                try:
+                    # interaction.response.send_message zaten kullanıldığı için followup kullanıyoruz
+                    await interaction.followup.send(
+                        f" link: ({self.event_name}): {event_link}",
+                        ephemeral=True
+                    )
+                except Exception as e:
+                    print(f”no link: {e}")
+                    # Opsiyonel: Kullanıcıya hata mesajı gönderilebilir
+                    # await interaction.followup.send(“no link .”, ephemeral=True)
+            # --- last ---
     
     # Send the button to the target channel
     try:
@@ -1134,7 +1168,7 @@ async def extract_lepoker_player_names(url, selector):
             # 7. Try one more approach - get all text content from the page and parse it
             if len(player_names) < 635:
                 print("Trying to extract from full page content...")
-                try:
+                try: 
                     full_page_text = await page.evaluate("""() => {
                         return document.body.innerText;
                     }""")
@@ -1227,4 +1261,4 @@ async def playhelp(ctx):
     )
     await ctx.send(embed=embed)
 
-bot.run(“BOTTOKENHERE”)
+bot.run("BOTTOKENHERE”)
