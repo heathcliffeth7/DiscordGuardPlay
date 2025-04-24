@@ -5,6 +5,11 @@ import os
 import asyncio
 from datetime import timedelta
 from playwright.async_api import async_playwright
+import difflib  # For fuzzy matching
+import dotenv   # For .env file support
+
+# Load environment variables from .env file
+dotenv.load_dotenv()
 
 # Record function: Adds or updates a record in the Excel file.
 # The discord_id is converted to a string to prevent scientific notation.
@@ -37,6 +42,16 @@ def record_play(discord_id, discord_username, in_game_username, event_name):
         sheet.append([str(discord_id), discord_username, in_game_username])
     
     workbook.save(file_name)
+
+# Function to calculate string similarity for fuzzy matching
+def string_similarity(s1, s2):
+    # Convert both strings to lowercase for case-insensitive comparison
+    s1 = s1.lower()
+    s2 = s2.lower()
+    
+    # Calculate similarity ratio using difflib
+    similarity = difflib.SequenceMatcher(None, s1, s2).ratio()
+    return similarity
 
 # Intent settings
 intents = discord.Intents.default()
@@ -90,6 +105,118 @@ account_age_filter_enabled = False
 account_age_min_days = None
 account_age_action = None
 account_age_timeout_duration = None
+
+# Button interaction handler - Add this to fix the interaction failed issue
+@bot.event
+async def on_interaction(interaction):
+    if interaction.type == discord.InteractionType.component:
+        custom_id = interaction.data.get("custom_id", "")
+        if custom_id.startswith("play_button_"):
+            event_name = custom_id.replace("play_button_", "")
+            
+            # Check if event exists
+            if event_name not in events:
+                await interaction.response.send_message("This event no longer exists.", ephemeral=True)
+                return
+            
+            # Check if user has allowed role
+            has_allowed_role = False
+            if not allowed_role_ids:  # If no roles are specified, allow all
+                has_allowed_role = True
+            else:
+                for role in interaction.user.roles:
+                    if role.id in allowed_role_ids:
+                        has_allowed_role = True
+                        break
+            
+            if not has_allowed_role:
+                await interaction.response.send_message("You don't have the required role to use this button.", ephemeral=True)
+                return
+            
+            # Check user limit if set
+            user_limit = None
+            for role in interaction.user.roles:
+                if role.id in events[event_name]["limits"]:
+                    user_limit = events[event_name]["limits"][role.id]
+                    break
+            
+            if user_limit is not None:
+                usage_key = f"{event_name}_{interaction.user.id}"
+                if usage_counts.get(usage_key, 0) >= user_limit:
+                    await interaction.response.send_message(
+                        f"You've reached your limit of {user_limit} interactions for this event.",
+                        ephemeral=True
+                    )
+                    return
+            
+            # Create and send the modal
+            class NicknameModal(discord.ui.Modal):
+                def __init__(self, event_name, nickname_limit):
+                    super().__init__(title=f"Register for {event_name}")
+                    self.event_name = event_name
+                    self.nickname_limit = nickname_limit
+                    
+                    self.nickname = discord.ui.TextInput(
+                        label="Your In-Game Username",
+                        placeholder="Enter your in-game username here...",
+                        min_length=3,
+                        max_length=32
+                    )
+                    self.add_item(self.nickname)
+                
+                async def on_submit(self, interaction):
+                    in_game_username = self.nickname.value.strip()
+                    
+                    # Check same nickname limit if enabled
+                    if self.nickname_limit is not None:
+                        if in_game_username in event_nickname_counts.get(self.event_name, {}):
+                            if event_nickname_counts[self.event_name][in_game_username] >= self.nickname_limit:
+                                await interaction.response.send_message(
+                                    f"This in-game username has already been registered {self.nickname_limit} times.",
+                                    ephemeral=True
+                                )
+                                return
+                        
+                        # Update nickname count
+                        if self.event_name not in event_nickname_counts:
+                            event_nickname_counts[self.event_name] = {}
+                        event_nickname_counts[self.event_name][in_game_username] = event_nickname_counts[self.event_name].get(in_game_username, 0) + 1
+                    
+                    # Record the play
+                    record_play(interaction.user.id, str(interaction.user), in_game_username, self.event_name)
+                    
+                    # Update usage count if limits are set
+                    if events[self.event_name]["limits"]:
+                        usage_key = f"{self.event_name}_{interaction.user.id}"
+                        usage_counts[usage_key] = usage_counts.get(usage_key, 0) + 1
+                    
+                    # Send confirmation message
+                    await interaction.response.send_message(
+                        f"Successfully registered for {self.event_name} with username: {in_game_username}",
+                        ephemeral=True
+                    )
+                    
+                    # Send link if available
+                    event_link = events[self.event_name].get("link")
+                    event_password = events[self.event_name].get("password")
+                    
+                    if event_link:
+                        try:
+                            link_message = f"Link for {self.event_name}: {event_link}"
+                            if event_password:
+                                link_message += f"\nPassword: {event_password}"
+                            
+                            await interaction.followup.send(link_message, ephemeral=True)
+                        except Exception as e:
+                            print(f"Error sending link: {e}")
+            
+            # Send the modal
+            if event_name in event_nickname_limit:
+                modal = NicknameModal(event_name, event_nickname_limit[event_name])
+            else:
+                modal = NicknameModal(event_name, None)
+            
+            await interaction.response.send_modal(modal)
 
 # on_member_join event (Security Filters)
 @bot.event
@@ -293,6 +420,7 @@ async def createplayevent(ctx, event_name: str):
         return
     events[event_name] = {
         "link": None,
+        "password": None,  # Added password field
         "channel_id": None,
         "excel_file": f"{event_name}_play_records.xlsx",
         "limits": {}
@@ -301,15 +429,31 @@ async def createplayevent(ctx, event_name: str):
     await ctx.send(f"{event_name} event has been created.")
 
 @bot.command(name="setplaylink")
-async def setplaylink(ctx, event_name: str, link: str):
+async def setplaylink(ctx, event_name: str, link: str, *args):
     if not is_play_authorized(ctx):
         await ctx.message.delete()
         return
     if event_name not in events:
         await ctx.send("Please create the event first using !createplayevent.")
         return
+    
+    # Set the link
     events[event_name]["link"] = link
-    await ctx.send(f"Link set for {event_name} event: {link}")
+    
+    # Check for password in the arguments
+    password = None
+    for i, arg in enumerate(args):
+        if arg.lower() == "password" and i+1 < len(args):
+            password = args[i+1]
+            break
+    
+    # If password is found, store it
+    if password:
+        events[event_name]["password"] = password
+        await ctx.send(f"Link set for {event_name} event: {link}\nPassword: {password}")
+    else:
+        events[event_name]["password"] = None
+        await ctx.send(f"Link set for {event_name} event: {link}")
 
 @bot.command(name="setplaychannel")
 async def setplaychannel(ctx, event_name: str, channel_input: str):
@@ -348,6 +492,7 @@ async def setauthorizedrole(ctx, role_input: str):
         return
     authorized_role_id = role.id
     await ctx.send(f"Authorized role for play event commands set to: {role.mention}")
+
 @bot.command(name="sendplay")
 async def sendplay(ctx, event_name: str, channel_input: str = None):
     if not is_play_authorized(ctx):
@@ -376,127 +521,20 @@ async def sendplay(ctx, event_name: str, channel_input: str = None):
         if channel_id:
             target_channel = ctx.guild.get_channel(channel_id)
         else:
-            await ctx.send("No channel is set for this event. Please specify a channel or set one with !setplaychannel.")
+            await ctx.send("No channel is set for this event. Please specify a channel.")
             return
     
-    # Create the button
+    # Create a button for the event
     class PlayButton(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=None)
-        
-        @discord.ui.button(label="Play", style=discord.ButtonStyle.green, custom_id=f"play_button_{event_name}")
-        async def play_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-            # Check if user has any of the allowed roles
-            has_allowed_role = any(role.id in allowed_role_ids for role in interaction.user.roles)
-            if not has_allowed_role:
-                await interaction.response.send_message("You don't have permission to use this button.", ephemeral=True)
-                return
-            
-            # Check if user has reached their limit
-            user_limit = None
-            for role_id, limit in events[event_name]["limits"].items():
-                if role_id in [role.id for role in interaction.user.roles]:
-                    user_limit = limit
-                    break
-            
-            if user_limit is not None:
-                usage_key = f"{event_name}_{interaction.user.id}"
-                if usage_counts.get(usage_key, 0) >= user_limit:
-                    await interaction.response.send_message(
-                        f"You've reached your limit of {user_limit} interactions for this event.",
-                        ephemeral=True
-                    )
-                    return
-            
-            # Check same nickname limit if enabled for this event
-            if event_name in event_nickname_limit:
-                modal = NicknameModal(event_name, event_nickname_limit[event_name])
-                await interaction.response.send_modal(modal)
-            else:
-                modal = NicknameModal(event_name, None)
-                await interaction.response.send_modal(modal)
+            self.add_item(discord.ui.Button(
+                style=discord.ButtonStyle.primary,
+                label="Play",
+                custom_id=f"play_button_{event_name}"
+            ))
     
-    # Create the NicknameModal class
-    class NicknameModal(discord.ui.Modal, title=f"Register for {event_name}"):
-        def __init__(self, event_name, nickname_limit):
-            super().__init__()
-            self.event_name = event_name
-            self.nickname_limit = nickname_limit
-            
-            self.nickname = discord.ui.TextInput(
-                label="Your In-Game Username",
-                placeholder="Enter your in-game username here...",
-                min_length=3,
-                max_length=32
-            )
-            self.add_item(self.nickname)
-        
-       # Create the NicknameModal class
-    class NicknameModal(discord.ui.Modal, title=f"Register for {event_name}"):
-        def __init__(self, event_name, nickname_limit):
-            super().__init__()
-            self.event_name = event_name
-            self.nickname_limit = nickname_limit
-
-            self.nickname = discord.ui.TextInput(
-                label="Your In-Game Username",
-                placeholder="Enter your in-game username here...",
-                min_length=3,
-                max_length=32
-            )
-            self.add_item(self.nickname)
-
-        async def on_submit(self, interaction: discord.Interaction):
-            in_game_username = self.nickname.value.strip()
-
-            # Check same nickname limit if enabled
-            if self.nickname_limit is not None:
-                if in_game_username in event_nickname_counts.get(self.event_name, {}):
-                    if event_nickname_counts[self.event_name][in_game_username] >= self.nickname_limit:
-                        await interaction.response.send_message(
-                            f"This in-game username has already been registered {self.nickname_limit} times.",
-                            ephemeral=True
-                        )
-                        return
-
-                # Update nickname count
-                if self.event_name not in event_nickname_counts:
-                    event_nickname_counts[self.event_name] = {}
-                event_nickname_counts[self.event_name][in_game_username] = event_nickname_counts[self.event_name].get(in_game_username, 0) + 1
-
-            # Record the play
-            record_play(interaction.user.id, str(interaction.user), in_game_username, self.event_name)
-
-            # Update usage count if limits are set
-            if events[self.event_name]["limits"]:
-                usage_key = f"{self.event_name}_{interaction.user.id}"
-                usage_counts[usage_key] = usage_counts.get(usage_key, 0) + 1
-
-            # Önceki onay mesajını gönder
-            await interaction.response.send_message(
-                f"Successfully registered for {self.event_name} with username: {in_game_username}",
-                ephemeral=True
-            )
-
-            # --- first ---
-            # Get Link
-            event_link = events[self.event_name].get("link") # .get() kullanarak link yoksa hata almayı önle
-
-            # Link varsa, kullanıcıya özel (ephemeral) olarak gönder
-            if event_link:
-                try:
-                    # interaction.response.send_message zaten kullanıldığı için followup kullanıyoruz
-                    await interaction.followup.send(
-                        f" link: ({self.event_name}): {event_link}",
-                        ephemeral=True
-                    )
-                except Exception as e:
-                    print(f”no link: {e}")
-                    # Opsiyonel: Kullanıcıya hata mesajı gönderilebilir
-                    # await interaction.followup.send(“no link .”, ephemeral=True)
-            # --- last ---
-    
-    # Send the button to the target channel
+    # Send the button
     try:
         await target_channel.send(
             f"Click the button below to register for **{event_name}**:",
@@ -650,6 +688,11 @@ async def sendplaysettings(ctx, event_name: str):
     event_data = events[event_name]
     embed = discord.Embed(title=f"{event_name} Event Settings", color=discord.Color.blue())
     embed.add_field(name="Link", value=event_data["link"] or "Not set", inline=False)
+    
+    # Add password field if it exists
+    if event_data.get("password"):
+        embed.add_field(name="Password", value=event_data["password"], inline=False)
+    
     channel_id = event_data["channel_id"]
     channel_mention = f"<#{channel_id}>" if channel_id else "Not set"
     embed.add_field(name="Channel", value=channel_mention, inline=False)
@@ -742,7 +785,7 @@ async def playlistid(ctx, event_name: str):
     await ctx.send(file=discord.File(output_file_name))
 
 # Updated command: !checkgameusername - Checks if game usernames match with Discord IDs
-# Now supports "id" parameter to output only Discord IDs
+# Now supports case-insensitive matching and fuzzy matching
 @bot.command(name="checkgameusername")
 async def checkgameusername(ctx, first_param: str, event_name: str = None, *, usernames: str = None):
     if not is_play_authorized(ctx):
@@ -784,38 +827,90 @@ async def checkgameusername(ctx, first_param: str, event_name: str = None, *, us
     for row in sheet.iter_rows(min_row=2, values_only=True):
         discord_id = str(row[0])
         in_game_username = row[2]
-        username_to_discord[in_game_username] = discord_id
+        if in_game_username:
+            username_to_discord[in_game_username.lower()] = discord_id  # Store lowercase for case-insensitive matching
     
-    # Find matches
-    matches = []
+    # Find matches (exact, case-insensitive, and fuzzy)
+    exact_matches = []
+    case_insensitive_matches = []
+    fuzzy_matches = []
+    
     for username in username_list:
+        username_lower = username.lower()
+        
+        # Check for exact match
         if username in username_to_discord:
-            matches.append((username, username_to_discord[username]))
+            exact_matches.append((username, username_to_discord[username]))
+        # Check for case-insensitive match
+        elif username_lower in username_to_discord:
+            case_insensitive_matches.append((username, username_to_discord[username_lower]))
+        else:
+            # Check for fuzzy matches (allowing 2-3 character differences)
+            best_match = None
+            best_similarity = 0.7  # Threshold for fuzzy matching (adjust as needed)
+            
+            for db_username, discord_id in username_to_discord.items():
+                similarity = string_similarity(username, db_username)
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match = (username, discord_id, db_username, similarity)
+            
+            if best_match:
+                fuzzy_matches.append(best_match)
+    
+    # Combine all matches
+    all_matches = exact_matches + case_insensitive_matches + fuzzy_matches
     
     # Create result message
     result_message = f"Checked {len(username_list)} game usernames for event '{event_name}'.\n"
-    result_message += f"Found {len(matches)} matching Discord IDs."
+    result_message += f"Found {len(all_matches)} matching Discord IDs (Exact: {len(exact_matches)}, Case-insensitive: {len(case_insensitive_matches)}, Fuzzy: {len(fuzzy_matches)})."
     
     # Create a text file with the results
     output_file_name = f"{event_name}_username_matches.txt"
     with open(output_file_name, "w", encoding="utf-8") as f:
         f.write(f"Event: {event_name}\n")
         f.write(f"Total usernames checked: {len(username_list)}\n")
-        f.write(f"Total matches found: {len(matches)}\n\n")
+        f.write(f"Total matches found: {len(all_matches)}\n")
+        f.write(f"- Exact matches: {len(exact_matches)}\n")
+        f.write(f"- Case-insensitive matches: {len(case_insensitive_matches)}\n")
+        f.write(f"- Fuzzy matches: {len(fuzzy_matches)}\n\n")
         
         if id_only_mode:
             # In ID-only mode, just list the Discord IDs
             f.write("Discord IDs:\n")
-            for _, discord_id in matches:
-                f.write(f"{discord_id}\n")
+            for match in exact_matches:
+                f.write(f"{match[1]}\n")
+            for match in case_insensitive_matches:
+                f.write(f"{match[1]}\n")
+            for match in fuzzy_matches:
+                f.write(f"{match[1]}\n")
         else:
             # In normal mode, list both username and Discord ID
-            f.write("Matches (Game Username : Discord ID):\n")
-            for username, discord_id in matches:
-                f.write(f"{username} : {discord_id}\n")
+            if exact_matches:
+                f.write("Exact Matches (Game Username : Discord ID):\n")
+                for username, discord_id in exact_matches:
+                    f.write(f"{username} : {discord_id}\n")
+                f.write("\n")
+            
+            if case_insensitive_matches:
+                f.write("Case-Insensitive Matches (Game Username : Discord ID):\n")
+                for username, discord_id in case_insensitive_matches:
+                    f.write(f"{username} : {discord_id}\n")
+                f.write("\n")
+            
+            if fuzzy_matches:
+                f.write("Fuzzy Matches (Game Username : Discord ID : Database Username : Similarity):\n")
+                for username, discord_id, db_username, similarity in fuzzy_matches:
+                    f.write(f"{username} : {discord_id} : {db_username} : {similarity:.2f}\n")
     
     # Send the results
     await ctx.send(result_message, file=discord.File(output_file_name))
+
+# Alias for checkgameusername with id parameter
+@bot.command(name="checkgameusernameid")
+async def checkgameusernameid(ctx, event_name: str, *, usernames: str):
+    # This is just a convenience alias that calls checkgameusername with the id parameter
+    await checkgameusername(ctx, "id", event_name, usernames=usernames)
 
 @bot.command(name="allplaylist")
 async def allplaylist(ctx):
@@ -898,50 +993,16 @@ async def extract_lepoker_player_names(url, selector):
             await page.wait_for_timeout(5000)  # Additional 5 seconds wait
             
             # Check if we're on the correct page
-            print("Checking if we're on the correct page...")
-            page_title = await page.title()
-            print(f"Page title: {page_title}")
+            print("Page loaded, checking content")
             
             # Set to store unique player names
             player_names = set()
             
-            # First try the provided selector
-            print(f"Trying provided selector: {selector}")
-            try:
-                count = await page.locator(selector).count()
-                print(f"Found {count} elements with provided selector")
-            except Exception as e:
-                print(f"Error with provided selector: {str(e)}")
-                count = 0
-            
-            # If the provided selector doesn't work well, try these Lepoker.io specific selectors
-            if count < 10:
-                print("Provided selector found few elements, trying Lepoker.io specific selectors")
-                lepoker_selectors = [
-                    "div.truncate",
-                    ".player-name",
-                    ".player-username",
-                    ".player-list div.truncate",
-                    "tr td div.truncate",
-                    "tr td:nth-child(2)",
-                    ".players-table tr td:nth-child(2)",
-                    ".players-list div.truncate"
-                ]
-                
-                for current_selector in lepoker_selectors:
-                    try:
-                        count = await page.locator(current_selector).count()
-                        if count > 0:
-                            print(f"Found {count} elements with selector: {current_selector}")
-                            selector = current_selector
-                            break
-                    except Exception:
-                        continue
-            
-            # Initial extraction
-            print("Performing initial extraction...")
-            try:
+            # Function to extract names and return how many new names were found
+            async def extract_names():
                 elements = await page.locator(selector).all()
+                initial_count = len(player_names)
+                
                 for element in elements:
                     try:
                         text = await element.text_content()
@@ -950,54 +1011,15 @@ async def extract_lepoker_player_names(url, selector):
                             player_names.add(text)
                     except Exception:
                         continue
-            except Exception as e:
-                print(f"Error in initial extraction: {str(e)}")
+                
+                return len(player_names) - initial_count
             
+            # Initial extraction
+            await extract_names()
             print(f"Initial extraction found {len(player_names)} players")
             
-            # Specialized scrolling for Lepoker.io
-            print("Starting specialized scrolling for Lepoker.io...")
-            
-            # First, try to find and click any "Show All" or similar buttons
-            show_all_selectors = [
-                "button:has-text('Show All')",
-                "button:has-text('All Players')",
-                "button:has-text('View All')",
-                ".show-all-button",
-                ".view-all-button"
-            ]
-            
-            for show_selector in show_all_selectors:
-                try:
-                    if await page.locator(show_selector).count() > 0:
-                        print(f"Found 'Show All' button with selector: {show_selector}")
-                        await page.click(show_selector)
-                        await page.wait_for_timeout(5000)  # Wait for content to load
-                        break
-                except Exception:
-                    continue
-            
-            # Function to extract player names after each action
-            async def extract_names():
-                try:
-                    elements = await page.locator(selector).all()
-                    count_before = len(player_names)
-                    for element in elements:
-                        try:
-                            text = await element.text_content()
-                            text = text.strip()
-                            if text and len(text) > 0:
-                                player_names.add(text)
-                        except Exception:
-                            continue
-                    return len(player_names) - count_before
-                except Exception as e:
-                    print(f"Error in extract_names: {str(e)}")
-                    return 0
-            
-            # Specialized scrolling approach for Lepoker.io
-            # 1. First try continuous small scrolls
-            print("Performing continuous small scrolls...")
+            # 1. Try small scrolls first
+            print("Starting small scrolls...")
             for i in range(50):
                 try:
                     # Scroll down a small amount
@@ -1216,9 +1238,9 @@ async def playhelp(ctx):
             "1. **!createplayevent <event_name>**\n"
             "   - Description: Creates a new event.\n"
             "   - Example: `!createplayevent Tournament2025`\n\n"
-            "2. **!setplaylink <event_name> <link>**\n"
-            "   - Description: Sets the link for the event.\n"
-            "   - Example: `!setplaylink Tournament2025 https://example.com/tournament`\n\n"
+            "2. **!setplaylink <event_name> <link> [password xxxxx]**\n"
+            "   - Description: Sets the link and optional password for the event.\n"
+            "   - Example: `!setplaylink Tournament2025 https://example.com/tournament password 12345`\n\n"
             "3. **!setplaychannel <event_name> <channelID or #channel>**\n"
             "   - Description: Sets the channel where the event's button will be sent.\n\n"
             "4. **!setauthorizedrole <roleID or @role>**\n"
@@ -1246,19 +1268,27 @@ async def playhelp(ctx):
             "15. **!allplaylist**\n"
             "    - Description: Lists all created events.\n\n"
             "16. **!checkgameusername <event_name> <username1 username2 ...>**\n"
-            "    - Description: Checks if the provided game usernames match with Discord IDs in the event records.\n"
+            "    - Description: Checks if the provided game usernames match with Discord IDs in the event records. Now supports case-insensitive and fuzzy matching.\n"
             "    - Example: `!checkgameusername Tournament2025 Player1 Player2 Player3`\n\n"
             "17. **!checkgameusername id <event_name> <username1 username2 ...>**\n"
             "    - Description: Same as above, but outputs only the Discord IDs in the text file.\n"
             "    - Example: `!checkgameusername id Tournament2025 Player1 Player2 Player3`\n\n"
-            "18. **!getusername <url> <selector>**\n"
+            "18. **!checkgameusernameid <event_name> <username1 username2 ...>**\n"
+            "    - Description: Alias for the above command, outputs only Discord IDs.\n"
+            "    - Example: `!checkgameusernameid Tournament2025 Player1 Player2 Player3`\n\n"
+            "19. **!getusername <url> <selector>**\n"
             "    - Description: Extracts player names from a webpage using the specified selector and saves them to a text file.\n"
             "    - Example: `!getusername https://app.lepoker.io/m/lj2Dxdy/players \"div.truncate\"`\n\n"
-            "19. **!playhelp**\n"
+            "20. **!playhelp**\n"
             "    - Description: Shows this help menu.\n"
         ),
         color=discord.Color.blue()
     )
     await ctx.send(embed=embed)
 
-bot.run("BOTTOKENHERE”)
+# Get bot token from environment variable
+bot_token = os.getenv("PLAYBOT")
+if not bot_token:
+    bot_token = "BOTTOKENHERE"  # Fallback to hardcoded token if env var not set
+
+bot.run(bot_token)
