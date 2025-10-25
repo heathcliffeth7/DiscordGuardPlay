@@ -3915,13 +3915,27 @@ async def set_regex_exempt(ctx, regexsettingsname: str, kind: str, *, targets: s
     if kind_l == "roles":
         guild_rules[name_key]["exempt_roles"] = selected
         save_settings()
-        mentions = ", ".join(f"<@&{i}>" for i in selected)
-        msg = f"Exempt roles updated for `{regexsettingsname}`: {mentions}"
+        names = []
+        for rid in selected:
+            role = ctx.guild.get_role(rid)
+            if role:
+                names.append(role.name)
+            else:
+                names.append(f"Unknown({rid})")
+        names_str = ", ".join(names)
+        msg = f"Exempt roles updated for `{regexsettingsname}`: {names_str}"
     else:
         guild_rules[name_key]["exempt_users"] = selected
         save_settings()
-        mentions = ", ".join(f"<@{i}>" for i in selected)
-        msg = f"Exempt users updated for `{regexsettingsname}`: {mentions}"
+        names = []
+        for uid in selected:
+            member = ctx.guild.get_member(uid)
+            if member:
+                names.append(member.name)
+            else:
+                names.append(f"Unknown({uid})")
+        names_str = ", ".join(names)
+        msg = f"Exempt users updated for `{regexsettingsname}`: {names_str}"
     if invalid:
         msg += f"\nIgnored/Invalid: {' '.join(invalid)}"
     await ctx.send(msg)
@@ -3939,16 +3953,30 @@ async def regexsettings(ctx, regexsettingsname: str = None):
         return
 
     def _mentions_list(ids: set[int], kind: str) -> str:
-        """Convert a set of IDs to Discord mentions. Returns all items without limit."""
+        """Convert a set of IDs to names/mentions. Channels use mentions, users/roles use names."""
         if not ids:
             return "None"
         ids_list = list(ids)
         if kind == "channel":
             return ", ".join(f"<#{i}>" for i in ids_list)
         elif kind == "user":
-            return ", ".join(f"<@{i}>" for i in ids_list)
+            names = []
+            for uid in ids_list:
+                member = ctx.guild.get_member(uid)
+                if member:
+                    names.append(member.name)
+                else:
+                    names.append(f"Unknown({uid})")
+            return ", ".join(names)
         elif kind == "role":
-            return ", ".join(f"<@&{i}>" for i in ids_list)
+            names = []
+            for rid in ids_list:
+                role = ctx.guild.get_role(rid)
+                if role:
+                    names.append(role.name)
+                else:
+                    names.append(f"Unknown({rid})")
+            return ", ".join(names)
         return "None"
 
     if regexsettingsname:
