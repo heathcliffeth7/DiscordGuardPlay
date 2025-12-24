@@ -329,8 +329,12 @@ def save_security_settings():
                     "dm_message": rule_data.get("dm_message", ""),
                     "notify_channel_id": rule_data.get("notify_channel_id"),
                     "channels": list(rule_data.get("channels", set())),
+                    "excluded_channels": list(rule_data.get("excluded_channels", set())),
+                    "targeted_roles": list(rule_data.get("targeted_roles", set())),
+                    "exempted_roles": list(rule_data.get("exempted_roles", set())),
                     "nonreply_only": rule_data.get("nonreply_only", False),
                     "mod_action": rule_data.get("mod_action"),
+                    "regex_pattern": rule_data.get("regex_pattern"),  # None for similarity mode
                 }
         
         # Serialize captcha panel texts
@@ -495,6 +499,17 @@ def load_security_settings():
                             mod_action_value = None
                     else:
                         mod_action_value = None
+                    # Load regex_pattern if present (None for similarity mode)
+                    regex_pattern_value = rule_data.get("regex_pattern")
+                    if regex_pattern_value is not None:
+                        regex_pattern_value = str(regex_pattern_value)
+                        # Validate the regex pattern
+                        try:
+                            re.compile(regex_pattern_value, re.IGNORECASE)
+                        except re.error:
+                            print(f"[SECURITY] Warning: Invalid regex pattern in rule '{rule_name}' for guild {guild_id_str}")
+                            regex_pattern_value = None
+
                     spam_rules_by_guild[guild_id][rule_name] = {
                         "label": label,
                         "min_length": max(0, min_length),
@@ -504,8 +519,12 @@ def load_security_settings():
                         "dm_message": dm_message,
                         "notify_channel_id": notify_channel_id,
                         "channels": set(rule_data.get("channels", [])),
+                        "excluded_channels": set(rule_data.get("excluded_channels", [])),
+                        "targeted_roles": set(rule_data.get("targeted_roles", [])),
+                        "exempted_roles": set(rule_data.get("exempted_roles", [])),
                         "nonreply_only": _coerce_bool(rule_data.get("nonreply_only", False)),
                         "mod_action": mod_action_value,
+                        "regex_pattern": regex_pattern_value,
                     }
                 except Exception as e:
                     print(f"[SECURITY] Warning: Could not load spam rule '{rule_name}' for guild {guild_id_str}: {e}")
@@ -1293,9 +1312,29 @@ async def _check_message_against_spam_rules(message: discord.Message):
     })
 
     for name_key, rule in guild_rules.items():
+        # Check excluded channels first
+        excluded_channels = rule.get("excluded_channels", set())
+        if excluded_channels and message.channel.id in excluded_channels:
+            continue
+
+        # Check included channels
         channels = rule.get("channels", set())
         if channels and message.channel.id not in channels:
             continue
+
+        # Check exempted roles first
+        exempted_roles = rule.get("exempted_roles", set())
+        if exempted_roles:
+            user_role_ids = {role.id for role in message.author.roles}
+            if user_role_ids & exempted_roles:  # User has at least one exempted role
+                continue
+
+        # Check targeted roles
+        targeted_roles = rule.get("targeted_roles", set())
+        if targeted_roles:
+            user_role_ids = {role.id for role in message.author.roles}
+            if not (user_role_ids & targeted_roles):  # User has none of the targeted roles
+                continue
 
         nonreply_only = rule.get("nonreply_only", False)
         # Skip this rule for reply messages if nonreply_only is enabled
@@ -1314,8 +1353,13 @@ async def _check_message_against_spam_rules(message: discord.Message):
         if message_count <= 1:
             continue
 
+        # Check if this is a regex-based rule or similarity-based rule
+        regex_pattern_str = rule.get("regex_pattern")
         similarity_threshold = rule.get("similarity_threshold", 0.0)
-        if similarity_threshold <= 0:
+
+        # For similarity mode, require similarity_threshold > 0
+        # For regex mode, regex_pattern must be set
+        if not regex_pattern_str and similarity_threshold <= 0:
             continue
 
         relevant_messages = [
@@ -1337,23 +1381,40 @@ async def _check_message_against_spam_rules(message: discord.Message):
         if len(relevant_messages) < message_count:
             continue
 
-        similar_count = 0
-        for entry in relevant_messages:
-            entry_content = entry.get("content", "")
-            char_ratio = SequenceMatcher(None, content, entry_content).ratio() if entry_content else 0.0
+        if regex_pattern_str:
+            # REGEX MODE: Count messages that match the regex pattern
+            try:
+                compiled_pattern = re.compile(regex_pattern_str, re.IGNORECASE)
+            except re.error:
+                continue  # Invalid regex, skip this rule
 
-            entry_tokens = entry.get("tokens")
-            if entry_tokens is None:
-                entry_tokens = _extract_word_tokens(entry_content)
-                entry["tokens"] = entry_tokens
+            matching_count = 0
+            for entry in relevant_messages:
+                entry_content = entry.get("content", "")
+                if compiled_pattern.search(entry_content):
+                    matching_count += 1
+            if matching_count >= message_count:
+                await _handle_spam_rule_trigger(message, name_key, rule)
+                continue
+        else:
+            # SIMILARITY MODE: Original behavior
+            similar_count = 0
+            for entry in relevant_messages:
+                entry_content = entry.get("content", "")
+                char_ratio = SequenceMatcher(None, content, entry_content).ratio() if entry_content else 0.0
 
-            token_ratio = _token_multiset_similarity(content_tokens, entry_tokens)
-            ratio = max(char_ratio, token_ratio)
-            if ratio >= similarity_threshold:
-                similar_count += 1
-        if similar_count >= message_count:
-            await _handle_spam_rule_trigger(message, name_key, rule)
-            continue
+                entry_tokens = entry.get("tokens")
+                if entry_tokens is None:
+                    entry_tokens = _extract_word_tokens(entry_content)
+                    entry["tokens"] = entry_tokens
+
+                token_ratio = _token_multiset_similarity(content_tokens, entry_tokens)
+                ratio = max(char_ratio, token_ratio)
+                if ratio >= similarity_threshold:
+                    similar_count += 1
+            if similar_count >= message_count:
+                await _handle_spam_rule_trigger(message, name_key, rule)
+                continue
 
 async def _handle_spam_rule_trigger(message: discord.Message, rule_key: str, rule: dict):
     """Execute actions when a spam rule is triggered"""
@@ -1949,9 +2010,27 @@ async def securityhelp(ctx):
         "   - Description: Shows active regex rules and their details (channels and exemptions). Provide a name to see only that rule.\n\n"
         "14. **!delregexsettings <regexsettingsname>**\n"
         "   - Description: Deletes the specified regex setting from this server.\n\n"
-        "15. **!spamrule <rulename> [mod warn|delete|warnanddelete] characters>X %Y <duration> message>Z dm \"text\" modlogchannel #channel [nonreply] [channels #ch1 #ch2]**\n"
-        "   - Description: Creates a spam detection rule with similarity threshold.\n"
-        "   - Example: `!spamrule test characters>30 %80 24h message>3 dm \"Stop spamming\" modlogchannel #alerts`\n\n"
+        "15. **!spamrule** - Two modes available:\n"
+        "   **Mod Actions:** `mod warn` (DM only), `mod delete` (delete msg), `mod warnanddelete` (both)\n\n"
+        "   **Time Format:** `s`=saniye, `min`=dakika, `h`=saat, `d`=gun, `m`=ay(30 gun)\n"
+        "   Examples: `30s`, `5min`, `1h`, `24h`, `7d`, `30d`, `1m`, `12m`\n\n"
+        "   **Channel Options:** (after modlogchannel)\n"
+        "   - `channels allchannel` - applies to all channels\n"
+        "   - `channels #ch1 #ch2` - applies only to these channels\n"
+        "   - `channels allchannel notchannel #ch1 #ch2` - all channels except these\n\n"
+        "   **Role Options:** (mention or role ID)\n"
+        "   - `roles allroles` - applies to all users (default)\n"
+        "   - `roles @role1 @role2` or `roles 123456 789012` - only these roles\n"
+        "   - `roles allroles exemptroles @mod 123456` - all except these roles\n\n"
+        "   **Similarity Mode:**\n"
+        "   `!spamrule <name> [mod action] characters>X %Y <duration> message>Z dm \"text\" modlogchannel #ch [channels ...]`\n"
+        "   - Detects similar messages based on character/token similarity.\n"
+        "   - Example: `!spamrule test mod warn characters>30 %80 24h message>3 dm \"Stop\" modlogchannel #alerts channels allchannel`\n\n"
+        "   **Regex Mode:**\n"
+        "   `!spamrule <name> [mod action] regex \"pattern\" <duration> message>Z dm \"text\" modlogchannel #ch [channels ...]`\n"
+        "   - Detects messages matching a regex pattern.\n"
+        "   - Example: `!spamrule linkspam mod warn regex \"https?://\\S+\" 1h message>2 dm \"Links!\" modlogchannel #alerts channels #general #chat`\n"
+        "   - Example: `!spamrule invitespam mod delete regex \"discord\\.gg/\\S+\" 24h message>3 dm \"No spam\" modlogchannel #mod-log channels allchannel notchannel #bot`\n\n"
         "16. **!removespamrule <rulename>**\n"
         "   - Description: Removes a spam detection rule.\n\n"
         "17. **!spamrules [rulename]**\n"
@@ -2258,30 +2337,60 @@ async def spamrule(ctx, rulename: str, *, rule_spec: str = ""):
             return
         mod_action = mod_action_token
 
-    if len(parts) < 5:
-        await ctx.send(
-            "Invalid format. Expected `characters>`, `%`, `<duration>`, `message>`, optional `dm`, then your DM text and channels."
-        )
-        return
+    # Check if using regex mode or similarity mode
+    regex_pattern_str: str | None = None
+    compiled_regex: re.Pattern | None = None
 
-    length_token = parts.pop(0)
-    length_match = re.fullmatch(r"characters\s*>\s*(\d+)", length_token, flags=re.IGNORECASE)
-    if not length_match:
-        await ctx.send("Specify minimum characters like `characters>30`.")
-        return
-    min_length = int(length_match.group(1))
+    if parts and parts[0].lower() == "regex":
+        # REGEX MODE
+        parts.pop(0)  # Remove "regex" keyword
+        if not parts:
+            await ctx.send("Provide a regex pattern after `regex` keyword (wrap in quotes if it has spaces).")
+            return
+        regex_pattern_str = parts.pop(0)
+        # Strip invisible/zero-width Unicode characters that Discord might add
+        regex_pattern_str = ''.join(c for c in regex_pattern_str if c.isprintable() or c in '\t\n\r')
+        try:
+            compiled_regex = re.compile(regex_pattern_str, re.IGNORECASE)
+        except re.error as exc:
+            await ctx.send(f"Invalid regex pattern: {exc}")
+            return
+        # In regex mode, min_length and similarity are not used
+        min_length = 0
+        similarity_threshold = 0.0
 
-    similarity_token = parts.pop(0)
-    similarity_match = None
-    for pattern in (r"%\s*(\d+(?:\.\d+)?)", r"(\d+(?:\.\d+)?)%", r"similarity\s*>\s*(\d+(?:\.\d+)?)"):
-        similarity_match = re.fullmatch(pattern, similarity_token, flags=re.IGNORECASE)
-        if similarity_match:
-            break
-    if not similarity_match:
-        await ctx.send("Specify similarity like `%80` or `80%`.")
-        return
-    similarity_value = float(similarity_match.group(1))
-    similarity_threshold = max(0.0, min(similarity_value / 100.0, 1.0))
+        # Regex mode requires: <duration>, message>, optional dm, modlogchannel
+        if len(parts) < 3:
+            await ctx.send(
+                "Invalid format for regex mode. Expected `regex \"pattern\" <duration> message>N dm \"text\" modlogchannel #channel`."
+            )
+            return
+    else:
+        # SIMILARITY MODE (original behavior)
+        if len(parts) < 5:
+            await ctx.send(
+                "Invalid format. Expected `characters>`, `%`, `<duration>`, `message>`, optional `dm`, then your DM text and channels."
+            )
+            return
+
+        length_token = parts.pop(0)
+        length_match = re.fullmatch(r"characters\s*>\s*(\d+)", length_token, flags=re.IGNORECASE)
+        if not length_match:
+            await ctx.send("Specify minimum characters like `characters>30`.")
+            return
+        min_length = int(length_match.group(1))
+
+        similarity_token = parts.pop(0)
+        similarity_match = None
+        for pattern in (r"%\s*(\d+(?:\.\d+)?)", r"(\d+(?:\.\d+)?)%", r"similarity\s*>\s*(\d+(?:\.\d+)?)"):
+            similarity_match = re.fullmatch(pattern, similarity_token, flags=re.IGNORECASE)
+            if similarity_match:
+                break
+        if not similarity_match:
+            await ctx.send("Specify similarity like `%80` or `80%`.")
+            return
+        similarity_value = float(similarity_match.group(1))
+        similarity_threshold = max(0.0, min(similarity_value / 100.0, 1.0))
 
     duration_token = parts.pop(0).lower()
     duration_display = duration_token
@@ -2289,13 +2398,13 @@ async def spamrule(ctx, rulename: str, *, rule_spec: str = ""):
     if time_window is not None:
         duration_match = re.fullmatch(r"(\d+)([a-z]+)", duration_token)
     else:
-        duration_match = re.fullmatch(r"(\d+)([smhd])", duration_token)
+        duration_match = re.fullmatch(r"(\d+)(s|min|h|d|m)", duration_token)
         if not duration_match:
-            await ctx.send("Specify time window like `24h`, `7d`, or `120s`.")
+            await ctx.send("Specify time window like `24h`, `7d`, `5min`, or `1m` (month).")
             return
         window_value = int(duration_match.group(1))
         window_unit = duration_match.group(2)
-        unit_multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        unit_multipliers = {"s": 1, "min": 60, "h": 3600, "d": 86400, "m": 2592000}
         time_window = window_value * unit_multipliers[window_unit]
         duration_display = f"{window_value}{window_unit}"
 
@@ -2306,7 +2415,7 @@ async def spamrule(ctx, rulename: str, *, rule_spec: str = ""):
         return
     message_count = int(message_match.group(1))
 
-    KEYWORDS = {"modlogchannel", "specchannel", "nonreply"}
+    KEYWORDS = {"modlogchannel", "channels", "allchannel", "notchannel", "nonreply", "roles", "allroles", "exemptroles"}
 
     def _is_keyword(token: str) -> bool:
         lowered = token.lower()
@@ -2350,8 +2459,28 @@ async def spamrule(ctx, rulename: str, *, rule_spec: str = ""):
             return None
         return ctx.guild.get_channel(channel_id_inner)
 
+    def _resolve_role(token: str) -> discord.Role | None:
+        raw = token.strip()
+        if raw.startswith("<@&") and raw.endswith(">"):
+            try:
+                role_id_inner = int(raw[3:-1])
+            except ValueError:
+                return None
+            return ctx.guild.get_role(role_id_inner)
+        if raw.startswith("@"):
+            name_inner = raw[1:]
+            return discord.utils.get(ctx.guild.roles, name=name_inner)
+        try:
+            role_id_inner = int(raw)
+        except ValueError:
+            return None
+        return ctx.guild.get_role(role_id_inner)
+
     notify_channel: discord.TextChannel | None = None
     monitored_channels: set[int] = set()
+    excluded_channels: set[int] = set()
+    targeted_roles: set[int] = set()
+    exempted_roles: set[int] = set()
     nonreply_only = False
 
     while parts:
@@ -2368,22 +2497,89 @@ async def spamrule(ctx, rulename: str, *, rule_spec: str = ""):
                 return
             notify_channel = channel
             continue
-        if lowered == "specchannel":
+        if lowered == "channels":
             if not parts:
-                await ctx.send("Provide at least one channel after `specchannel`.")
+                await ctx.send("Provide channel option after `channels` (allchannel, #ch1 #ch2, or allchannel notchannel #ch).")
                 return
-            spec_found = False
-            while parts and not _is_keyword(parts[0]):
-                channel_token = parts.pop(0)
-                channel = _resolve_channel(channel_token)
-                if not isinstance(channel, discord.TextChannel):
-                    await ctx.send("`specchannel` must be followed by valid text channel mentions.")
+
+            next_token = parts[0].lower()
+            if next_token == "allchannel":
+                parts.pop(0)  # Remove "allchannel"
+                # Check if followed by "notchannel" for exclusion
+                if parts and parts[0].lower() == "notchannel":
+                    parts.pop(0)  # Remove "notchannel"
+                    if not parts:
+                        await ctx.send("Provide at least one channel after `notchannel`.")
+                        return
+                    excl_found = False
+                    while parts and not _is_keyword(parts[0]):
+                        channel_token = parts.pop(0)
+                        channel = _resolve_channel(channel_token)
+                        if not isinstance(channel, discord.TextChannel):
+                            await ctx.send("`notchannel` must be followed by valid text channel mentions.")
+                            return
+                        excluded_channels.add(channel.id)
+                        excl_found = True
+                    if not excl_found:
+                        await ctx.send("Provide at least one channel after `notchannel`.")
+                        return
+                # allchannel alone = all channels (monitored_channels stays empty)
+            else:
+                # Specific channels: channels #ch1 #ch2
+                spec_found = False
+                while parts and not _is_keyword(parts[0]):
+                    channel_token = parts.pop(0)
+                    channel = _resolve_channel(channel_token)
+                    if not isinstance(channel, discord.TextChannel):
+                        await ctx.send("`channels` must be followed by valid text channel mentions.")
+                        return
+                    monitored_channels.add(channel.id)
+                    spec_found = True
+                if not spec_found:
+                    await ctx.send("Provide at least one channel after `channels`.")
                     return
-                monitored_channels.add(channel.id)
-                spec_found = True
-            if not spec_found:
-                await ctx.send("Provide at least one channel after `specchannel`.")
+            continue
+        if lowered == "roles":
+            if not parts:
+                await ctx.send("Provide role option after `roles` (allroles, @role1 @role2, or allroles exemptroles @role).")
                 return
+
+            next_token = parts[0].lower()
+            if next_token == "allroles":
+                parts.pop(0)  # Remove "allroles"
+                # Check if followed by "exemptroles" for exclusion
+                if parts and parts[0].lower() == "exemptroles":
+                    parts.pop(0)  # Remove "exemptroles"
+                    if not parts:
+                        await ctx.send("Provide at least one role after `exemptroles`.")
+                        return
+                    exempt_found = False
+                    while parts and not _is_keyword(parts[0]):
+                        role_token = parts.pop(0)
+                        role = _resolve_role(role_token)
+                        if role is None:
+                            await ctx.send(f"`exemptroles` must be followed by valid role mentions. Could not resolve `{role_token}`.")
+                            return
+                        exempted_roles.add(role.id)
+                        exempt_found = True
+                    if not exempt_found:
+                        await ctx.send("Provide at least one role after `exemptroles`.")
+                        return
+                # allroles alone = all roles (targeted_roles stays empty)
+            else:
+                # Specific roles: roles @role1 @role2
+                spec_found = False
+                while parts and not _is_keyword(parts[0]):
+                    role_token = parts.pop(0)
+                    role = _resolve_role(role_token)
+                    if role is None:
+                        await ctx.send(f"`roles` must be followed by valid role mentions. Could not resolve `{role_token}`.")
+                        return
+                    targeted_roles.add(role.id)
+                    spec_found = True
+                if not spec_found:
+                    await ctx.send("Provide at least one role after `roles`.")
+                    return
             continue
         if lowered.startswith("nonreply"):
             state_token = None
@@ -2445,20 +2641,29 @@ async def spamrule(ctx, rulename: str, *, rule_spec: str = ""):
         "dm_message": dm_message,
         "notify_channel_id": notify_channel.id,
         "channels": monitored_channels,
+        "excluded_channels": excluded_channels,
+        "targeted_roles": targeted_roles,
+        "exempted_roles": exempted_roles,
         "nonreply_only": nonreply_only,
         "mod_action": mod_action,
+        "regex_pattern": regex_pattern_str,  # None for similarity mode, pattern string for regex mode
     }
 
     save_security_settings()
 
-    details = [
-        f"Spam rule `{label}` saved.",
-        f"- Min characters: {min_length}",
-        f"- Similarity: {similarity_threshold * 100:.0f}%",
+    details = [f"Spam rule `{label}` saved."]
+    if regex_pattern_str:
+        details.append(f"- Mode: Regex")
+        details.append(f"- Pattern: `{regex_pattern_str}`")
+    else:
+        details.append(f"- Mode: Similarity")
+        details.append(f"- Min characters: {min_length}")
+        details.append(f"- Similarity: {similarity_threshold * 100:.0f}%")
+    details.extend([
         f"- Window: {duration_display}",
         f"- Message count: {message_count}",
         f"- Notify: {notify_channel.mention}",
-    ]
+    ])
     if mod_action:
         action_description = {
             "warn": "Warn via DM",
@@ -2471,8 +2676,19 @@ async def spamrule(ctx, rulename: str, *, rule_spec: str = ""):
     if monitored_channels:
         channel_mentions = ", ".join(f"<#{cid}>" for cid in monitored_channels)
         details.append(f"- Monitored channels: {channel_mentions}")
+    elif excluded_channels:
+        excl_mentions = ", ".join(f"<#{cid}>" for cid in excluded_channels)
+        details.append(f"- Monitored channels: all except {excl_mentions}")
     else:
         details.append("- Monitored channels: all text channels")
+    if targeted_roles:
+        role_names = ", ".join(ctx.guild.get_role(rid).name if ctx.guild.get_role(rid) else str(rid) for rid in targeted_roles)
+        details.append(f"- Targeted roles: {role_names}")
+    elif exempted_roles:
+        exempt_names = ", ".join(ctx.guild.get_role(rid).name if ctx.guild.get_role(rid) else str(rid) for rid in exempted_roles)
+        details.append(f"- Targeted roles: all except {exempt_names}")
+    else:
+        details.append("- Targeted roles: all users")
     details.append(f"- Count only non-replies: {'Yes' if nonreply_only else 'No'}")
 
     await ctx.send("\n".join(details))
@@ -2556,6 +2772,7 @@ async def spamrules(ctx):
         label = rule.get("label", name_key)
         min_length = rule.get("min_length", 0)
         similarity = float(rule.get("similarity_threshold", 0.0)) * 100
+        regex_pattern = rule.get("regex_pattern")
         message_count = rule.get("message_count", 0)
         window = _format_window(rule.get("time_window", 0))
         nonreply_only = _coerce_bool(rule.get("nonreply_only", False))
@@ -2567,6 +2784,9 @@ async def spamrules(ctx):
             notify_channel = ctx.guild.get_channel(int(notify_channel_id))
 
         channels = rule.get("channels", set()) or set()
+        excluded_channels = rule.get("excluded_channels", set()) or set()
+        targeted_roles = rule.get("targeted_roles", set()) or set()
+        exempted_roles = rule.get("exempted_roles", set()) or set()
         if channels:
             channel_mentions = []
             for channel_id in sorted(channels):
@@ -2576,8 +2796,39 @@ async def spamrules(ctx):
                 else:
                     channel_mentions.append(f"`{channel_id}`")
             channels_text = ", ".join(channel_mentions)
+        elif excluded_channels:
+            excl_mentions = []
+            for channel_id in sorted(excluded_channels):
+                channel_obj = ctx.guild.get_channel(int(channel_id))
+                if isinstance(channel_obj, discord.TextChannel):
+                    excl_mentions.append(channel_obj.mention)
+                else:
+                    excl_mentions.append(f"`{channel_id}`")
+            channels_text = f"All except {', '.join(excl_mentions)}"
         else:
             channels_text = "All text channels"
+
+        # Role targeting
+        if targeted_roles:
+            role_names = []
+            for role_id in sorted(targeted_roles):
+                role_obj = ctx.guild.get_role(int(role_id))
+                if role_obj:
+                    role_names.append(role_obj.name)
+                else:
+                    role_names.append(f"`{role_id}`")
+            roles_text = ", ".join(role_names)
+        elif exempted_roles:
+            exempt_names = []
+            for role_id in sorted(exempted_roles):
+                role_obj = ctx.guild.get_role(int(role_id))
+                if role_obj:
+                    exempt_names.append(role_obj.name)
+                else:
+                    exempt_names.append(f"`{role_id}`")
+            roles_text = f"All except {', '.join(exempt_names)}"
+        else:
+            roles_text = "All users"
 
         notify_text = (
             notify_channel.mention
@@ -2585,13 +2836,19 @@ async def spamrules(ctx):
             else (f"`{notify_channel_id}`" if notify_channel_id else "Not set")
         )
 
+        lines.append(f"\n**{label}** (`{name_key}`)")
+        if regex_pattern:
+            lines.append(f"• Mode: Regex")
+            lines.append(f"• Pattern: `{regex_pattern}`")
+        else:
+            lines.append(f"• Mode: Similarity")
+            lines.append(f"• Min characters: {min_length}")
+            lines.append(f"• Similarity: {similarity:.0f}%")
         lines.extend([
-            f"\n**{label}** (`{name_key}`)",
-            f"• Min characters: {min_length}",
-            f"• Similarity: {similarity:.0f}%",
             f"• Threshold: {message_count} messages in {window}",
             f"• Mod-log channel: {notify_text}",
             f"• Scope: {channels_text}",
+            f"• Roles: {roles_text}",
             f"• Count only non-replies: {'Yes' if nonreply_only else 'No'}",
         ])
 
