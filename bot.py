@@ -1388,12 +1388,18 @@ async def _check_message_against_spam_rules(message: discord.Message):
             except re.error:
                 continue  # Invalid regex, skip this rule
 
+            # Check if CURRENT message matches regex
+            current_matches_regex = bool(compiled_pattern.search(content))
+
+            # Only count messages that match regex
             matching_count = 0
             for entry in relevant_messages:
                 entry_content = entry.get("content", "")
                 if compiled_pattern.search(entry_content):
                     matching_count += 1
-            if matching_count > message_count:
+
+            # Only trigger if count exceeded AND current message matches regex
+            if matching_count > message_count and current_matches_regex:
                 await _handle_spam_rule_trigger(message, name_key, rule)
                 continue
         else:
