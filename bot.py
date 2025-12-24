@@ -4249,25 +4249,28 @@ async def regexsettings(ctx, regexsettingsname: str = None):
     if not rules_list:
         await ctx.send("No regex settings found in this server.")
         return
-    
-    # Build message text
-    message_chunks = []
-    current_message = "**Regex Settings**\n\n"
-    
+
+    # Build and send each rule separately if needed
+    header_sent = False
     for name_key, rule in rules_list:
         pattern_text = rule.get("pattern", "-")
-        
+
         channels = rule.get("channels", set())
         exempt_users = rule.get("exempt_users", set())
         exempt_roles = rule.get("exempt_roles", set())
         status = "Active" if channels else "Inactive"
-        
-        # Get all mentions without limit
+
         channels_text = _mentions_list(channels, "channel")
         users_text = _mentions_list(exempt_users, "user")
         roles_text = _mentions_list(exempt_roles, "role")
-        
-        rule_text = (
+
+        if not header_sent:
+            rule_text = f"**Regex Settings**\n\n"
+            header_sent = True
+        else:
+            rule_text = ""
+
+        rule_text += (
             f"**{name_key}**\n"
             f"Status: {status}\n"
             f"Pattern: `{pattern_text}`\n"
@@ -4275,21 +4278,11 @@ async def regexsettings(ctx, regexsettingsname: str = None):
             f"Exempt Users: {users_text}\n"
             f"Exempt Roles: {roles_text}\n\n"
         )
-        
-        # Check if adding this rule would exceed message limit
-        if len(current_message) + len(rule_text) > 1900:
-            message_chunks.append(current_message)
-            current_message = "**Regex Settings (Continued)**\n\n" + rule_text
-        else:
-            current_message += rule_text
-    
-    # Add the last message chunk
-    if current_message:
-        message_chunks.append(current_message)
-    
-    # Send all chunks
-    for chunk in message_chunks:
-        await ctx.send(chunk)
+
+        # Split and send this rule's text
+        chunks = _chunk_text_message(rule_text, limit=2000)
+        for chunk in chunks:
+            await ctx.send(chunk)
 
 # Delete a regex setting by name
 @bot.command(name="delregexsettings")
