@@ -1460,6 +1460,15 @@ async def _handle_spam_rule_trigger(message: discord.Message, rule_key: str, rul
         try:
             await message.delete()
             delete_success = True
+            # Remove the deleted message from history so it doesn't count toward future spam checks
+            history_key = (message.guild.id, message.author.id)
+            user_history = spam_message_history.get(history_key, [])
+            # Remove entries matching this message content (within 2 seconds)
+            current_time = time.time()
+            user_history[:] = [
+                entry for entry in user_history
+                if not (entry.get("content") == message_content_snapshot and abs(entry.get("timestamp", 0) - current_time) < 2)
+            ]
         except discord.NotFound:
             delete_error = "Message already deleted"
             print(f"[SECURITY] Message already deleted when applying spam rule '{rule_key}'")
