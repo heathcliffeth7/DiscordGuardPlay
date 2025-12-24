@@ -1350,7 +1350,7 @@ async def _check_message_against_spam_rules(message: discord.Message):
             continue
 
         message_count = rule.get("message_count", 0)
-        if message_count <= 1:
+        if message_count < 1:
             continue
 
         # Check if this is a regex-based rule or similarity-based rule
@@ -1393,7 +1393,7 @@ async def _check_message_against_spam_rules(message: discord.Message):
                 entry_content = entry.get("content", "")
                 if compiled_pattern.search(entry_content):
                     matching_count += 1
-            if matching_count >= message_count:
+            if matching_count > message_count:
                 await _handle_spam_rule_trigger(message, name_key, rule)
                 continue
         else:
@@ -1412,7 +1412,7 @@ async def _check_message_against_spam_rules(message: discord.Message):
                 ratio = max(char_ratio, token_ratio)
                 if ratio >= similarity_threshold:
                     similar_count += 1
-            if similar_count >= message_count:
+            if similar_count > message_count:
                 await _handle_spam_rule_trigger(message, name_key, rule)
                 continue
 
