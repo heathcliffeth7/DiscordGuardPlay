@@ -336,7 +336,21 @@ def save_security_settings():
                     "mod_action": rule_data.get("mod_action"),
                     "regex_pattern": rule_data.get("regex_pattern"),  # None for similarity mode
                 }
-        
+
+        # Serialize spam message history
+        serializable_spam_history = {}
+        for (guild_id, user_id), entries in spam_message_history.items():
+            key = f"{guild_id}:{user_id}"
+            serializable_spam_history[key] = [
+                {
+                    "timestamp": entry.get("timestamp", 0),
+                    "content": entry.get("content", ""),
+                    "is_reply": entry.get("is_reply", False),
+                    "channel_id": entry.get("channel_id"),
+                }
+                for entry in entries
+            ]
+
         # Serialize captcha panel texts
         serializable_panel_texts = {}
         for guild_id, panel_data in captcha_panel_texts.items():
@@ -371,7 +385,8 @@ def save_security_settings():
             
             # Spam Settings
             "spam_rules_by_guild": serializable_spam_rules,
-            
+            "spam_message_history": serializable_spam_history,
+
             # Verify button usage (for statistics only)
             "verify_button_usage": dict(verify_button_usage)
         }
@@ -529,7 +544,45 @@ def load_security_settings():
                     }
                 except Exception as e:
                     print(f"[SECURITY] Warning: Could not load spam rule '{rule_name}' for guild {guild_id_str}: {e}")
-        
+
+        # Load spam message history
+        history_data = settings_data.get("spam_message_history", {})
+        spam_message_history.clear()
+        now = time.time()
+        # Calculate max_history_window from actual spam rules
+        max_rule_window = 0
+        for guild_rules in spam_rules_by_guild.values():
+            for rule in guild_rules.values():
+                rule_window = rule.get("time_window", 0)
+                if rule_window > max_rule_window:
+                    max_rule_window = rule_window
+        # Use rule-based window with buffer, minimum 24h
+        max_history_window = max(max_rule_window + 3600, 86400)
+        loaded_history_count = 0
+        for key, entries in history_data.items():
+            try:
+                guild_id_str, user_id_str = key.split(":")
+                guild_id = int(guild_id_str)
+                user_id = int(user_id_str)
+                history_key = (guild_id, user_id)
+                # Only load entries within max_history_window
+                valid_entries = [
+                    {
+                        "timestamp": entry.get("timestamp", 0),
+                        "content": entry.get("content", ""),
+                        "is_reply": entry.get("is_reply", False),
+                        "channel_id": entry.get("channel_id"),
+                        "tokens": None,  # Will be regenerated when needed
+                    }
+                    for entry in entries
+                    if now - entry.get("timestamp", 0) <= max_history_window
+                ]
+                if valid_entries:
+                    spam_message_history[history_key] = valid_entries
+                    loaded_history_count += len(valid_entries)
+            except (ValueError, KeyError) as e:
+                print(f"[SECURITY] Warning: Could not load spam history entry '{key}': {e}")
+
         # Verify button usage
         usage_data = settings_data.get("verify_button_usage", {})
         verify_button_usage.clear()
@@ -560,6 +613,8 @@ def load_security_settings():
         if spam_rules_by_guild:
             total_spam_rules = sum(len(rules) for rules in spam_rules_by_guild.values())
             print(f"  - Spam rules: {total_spam_rules} rules in {len(spam_rules_by_guild)} guilds")
+        if loaded_history_count > 0:
+            print(f"  - Spam message history: {loaded_history_count} entries for {len(spam_message_history)} users")
         print(f"  - Verify button usage for {len(verify_button_usage)} users")
 
         return True
@@ -715,7 +770,21 @@ def _parse_role_ids(env_value: str | None) -> Set[int]:
             print(f"⚠️  WARNING: Invalid role ID entry ignored: {token!r}")
     return ids
 
-# Function to calculate string similarity for fuzzy matching
+# Function to extract regex from markdown code blocks
+def _extract_regex_from_codeblock(text: str) -> str | None:
+    """Extract regex pattern from markdown code block (``` or `)"""
+    # Triple backtick code block
+    match = re.search(r'```(?:\w*\n)?(.*?)```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # Single backtick inline code
+    match = re.search(r'`([^`]+)`', text)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+# Function to parse pattern and flags from regex string
 def _parse_pattern_and_flags(raw_text):
     text = (raw_text or "").strip()
     flags_letters_parts = []
@@ -1439,6 +1508,9 @@ async def _handle_spam_rule_trigger(message: discord.Message, rule_key: str, rul
     spam_rule_trigger_log[(guild_id, user_id, rule_key)] = now
 
     await record_spam_violation(guild_id, user_id, rule_key, label=rule.get("label", rule_key))
+
+    # Save spam message history to persist across restarts
+    save_security_settings()
 
     mod_action = (rule.get("mod_action") or "").lower()
     dm_message = rule.get("dm_message")
@@ -4010,11 +4082,45 @@ class CaptchaCodeEntryView(discord.ui.View):
 
 # Define or update a regex rule
 @bot.command(name="regex")
-async def define_regex(ctx, regexsettingsname: str, *, regexcommand: str):
+async def define_regex(ctx, regexsettingsname: str, *, regexcommand: str = ""):
     if not is_security_authorized(ctx):
         await ctx.message.delete()
         return
+
     name_key = regexsettingsname.strip().lower()
+    pattern_source = None  # Nereden alindigi (bilgi icin)
+
+    # 1. TXT dosyasi kontrolu
+    if ctx.message.attachments:
+        for attachment in ctx.message.attachments:
+            if attachment.filename.lower().endswith('.txt'):
+                try:
+                    content_bytes = await attachment.read()
+                    regexcommand = content_bytes.decode('utf-8').strip()
+                    pattern_source = f"TXT dosyasi: {attachment.filename}"
+                    break
+                except Exception as e:
+                    await ctx.send(f"TXT dosyasi okunamadi: {e}")
+                    return
+
+    # 2. Kod blogu kontrolu (eger TXT yoksa)
+    if not pattern_source:
+        full_message = ctx.message.content
+        extracted = _extract_regex_from_codeblock(full_message)
+        if extracted:
+            regexcommand = extracted
+            pattern_source = "Kod blogu"
+
+    # 3. Bos kontrol
+    if not regexcommand.strip():
+        await ctx.send(
+            "Regex pattern belirtilmedi. Kullanim:\n"
+            "1. `!regex isim pattern`\n"
+            "2. `!regex isim ```pattern``` ` (kod blogu)\n"
+            "3. `!regex isim` + TXT dosyasi ekle"
+        )
+        return
+
     # Accept extended syntaxes: /pattern/flags or plain pattern with optional --flags i m s x ...
     pattern_text, flags_letters = _parse_pattern_and_flags(regexcommand)
     try:
@@ -4030,21 +4136,36 @@ async def define_regex(ctx, regexsettingsname: str, *, regexcommand: str):
     settings["compiled"] = compiled
     regex_settings_by_guild[guild_id][name_key] = settings
     save_settings()
+
+    source_info = f"\nKaynak: {pattern_source}" if pattern_source else ""
+
+    # Pattern parcalama (4000 karakterden uzunsa)
+    async def send_pattern_chunks(pattern: str, chunk_size: int = 4000):
+        """Pattern'i parcalar halinde gonder"""
+        if len(pattern) <= chunk_size:
+            await ctx.send(f"Pattern: `{pattern}`")
+        else:
+            total_parts = (len(pattern) + chunk_size - 1) // chunk_size
+            for i in range(0, len(pattern), chunk_size):
+                part_num = (i // chunk_size) + 1
+                chunk = pattern[i:i + chunk_size]
+                await ctx.send(f"Pattern ({part_num}/{total_parts}): `{chunk}`")
+
     if settings["channels"]:
         ch_mentions = ", ".join(f"<#{cid}>" for cid in settings["channels"])
         await ctx.send(
             f"Regex setting updated: `{regexsettingsname}`\n"
-            f"Pattern: `{regexcommand}`\n"
-            f"Engine: `{_REGEX_ENGINE_NAME}`  Flags: `{flags_letters or '-'}`\n"
+            f"Engine: `{_REGEX_ENGINE_NAME}`  Flags: `{flags_letters or '-'}`{source_info}\n"
             f"Applied channels: {ch_mentions}"
         )
+        await send_pattern_chunks(regexcommand)
     else:
         await ctx.send(
             f"Regex setting saved: `{regexsettingsname}`\n"
-            f"Pattern: `{regexcommand}`\n"
-            f"Engine: `{_REGEX_ENGINE_NAME}`  Flags: `{flags_letters or '-'}`\n"
+            f"Engine: `{_REGEX_ENGINE_NAME}`  Flags: `{flags_letters or '-'}`{source_info}\n"
             f"No channels assigned yet. Use `!setregexsettings {regexsettingsname} <channels>` to assign."
         )
+        await send_pattern_chunks(regexcommand)
 
 # Assign channels to a regex rule
 @bot.command(name="setregexsettings")
