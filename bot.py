@@ -55,6 +55,29 @@ SETTINGS_FILE = "bot_settings.json"
 SECURITY_SETTINGS_FILE = "security_settings.json"
 
 # Settings save/load functions
+def get_normalized_event_limits(event_data):
+    normalized_limits = {}
+    raw_limits = event_data.get("limits", {}) or {}
+
+    for role_id_raw, limit_raw in raw_limits.items():
+        try:
+            role_id = int(role_id_raw)
+            limit_value = int(limit_raw)
+        except (TypeError, ValueError):
+            print(f"[SETTINGS] Skipping invalid event limit entry: role_id={role_id_raw}, limit={limit_raw}")
+            continue
+        normalized_limits[role_id] = limit_value
+
+    return normalized_limits
+
+
+def reset_event_usage_counts(event_name):
+    prefix = f"{event_name}_"
+    keys_to_remove = [key for key in usage_counts if key.startswith(prefix)]
+    for key in keys_to_remove:
+        usage_counts.pop(key, None)
+
+
 def save_settings():
     """Save all bot settings to JSON file"""
     settings = {
@@ -72,7 +95,8 @@ def save_settings():
         "account_age_action": account_age_action,
         "account_age_timeout_duration": account_age_timeout_duration,
         "events": events,
-        "event_nickname_limit": event_nickname_limit
+        "event_nickname_limit": event_nickname_limit,
+        "scheduled_messages_by_guild": scheduled_messages_by_guild
     }
     
     # Convert regex settings to serializable format
@@ -99,7 +123,7 @@ def load_settings():
     global security_authorized_ids, play_authorized_ids, allowed_role_ids
     global no_avatar_filter_enabled, no_avatar_action, no_avatar_timeout_duration
     global account_age_filter_enabled, account_age_min_days, account_age_action, account_age_timeout_duration
-    global events, event_nickname_limit
+    global events, event_nickname_limit, scheduled_messages_by_guild
     
     if not os.path.exists(SETTINGS_FILE):
         print(f"[SETTINGS] Settings file {SETTINGS_FILE} not found, using defaults")
@@ -111,7 +135,15 @@ def load_settings():
         
         # Load basic settings
         captcha_verify_role_id = settings.get("captcha_verify_role_id")
-        captcha_panel_texts.update(settings.get("captcha_panel_texts", {}))
+
+        # JSON object keys are strings; normalize guild IDs back to integers so
+        # runtime lookups using ctx.guild.id continue to work after a restart.
+        captcha_panel_texts.clear()
+        for guild_id_raw, panel_data in settings.get("captcha_panel_texts", {}).items():
+            try:
+                captcha_panel_texts[int(guild_id_raw)] = panel_data
+            except (TypeError, ValueError):
+                print(f"[SETTINGS] Skipping invalid CAPTCHA panel guild ID: {guild_id_raw}")
         security_authorized_ids.update(settings.get("security_authorized_ids", []))
         play_authorized_ids.update(settings.get("play_authorized_ids", []))
         allowed_role_ids[:] = settings.get("allowed_role_ids", [])
@@ -125,9 +157,57 @@ def load_settings():
         account_age_action = settings.get("account_age_action")
         account_age_timeout_duration = settings.get("account_age_timeout_duration")
         
-        # Load play events
-        events.update(settings.get("events", {}))
+        # Load play events and normalize JSON string keys back to ints where needed
+        loaded_events = settings.get("events", {})
+        normalized_events = {}
+        for event_name, event_data in loaded_events.items():
+            if not isinstance(event_data, dict):
+                continue
+            normalized_event_data = dict(event_data)
+            normalized_event_data["limits"] = get_normalized_event_limits(normalized_event_data)
+            normalized_events[event_name] = normalized_event_data
+        events.update(normalized_events)
         event_nickname_limit.update(settings.get("event_nickname_limit", {}))
+
+        scheduled_messages_by_guild.clear()
+        for guild_id_str, guild_schedules in settings.get("scheduled_messages_by_guild", {}).items():
+            try:
+                guild_id = int(guild_id_str)
+            except (TypeError, ValueError):
+                print(f"[SETTINGS] Skipping invalid scheduled message guild ID: {guild_id_str}")
+                continue
+            if not isinstance(guild_schedules, dict):
+                continue
+
+            normalized_schedules = {}
+            for schedule_name, schedule_data in guild_schedules.items():
+                if not isinstance(schedule_data, dict):
+                    continue
+                normalized_name = normalize_autosend_name(schedule_name)
+                if not normalized_name:
+                    print(f"[SETTINGS] Skipping invalid scheduled message name: {guild_id}/{schedule_name}")
+                    continue
+                try:
+                    channel_id = int(schedule_data.get("channel_id"))
+                    interval_seconds = int(schedule_data.get("interval_seconds"))
+                except (TypeError, ValueError):
+                    print(f"[SETTINGS] Skipping invalid scheduled message: {guild_id}/{schedule_name}")
+                    continue
+
+                message = str(schedule_data.get("message", "")).strip()
+                if interval_seconds < MIN_AUTOSEND_INTERVAL_SECONDS or not message:
+                    print(f"[SETTINGS] Skipping incomplete scheduled message: {guild_id}/{schedule_name}")
+                    continue
+
+                normalized_schedules[normalized_name] = {
+                    "channel_id": channel_id,
+                    "interval_seconds": interval_seconds,
+                    "message": message,
+                    "enabled": bool(schedule_data.get("enabled", True)),
+                }
+
+            if normalized_schedules:
+                scheduled_messages_by_guild[guild_id] = normalized_schedules
         
         # Load regex settings and recompile patterns
         regex_data = settings.get("regex_settings_by_guild", {})
@@ -446,16 +526,18 @@ def load_security_settings():
         # Whitelist
         security_whitelist_users = set(settings_data.get("security_whitelist_users", []))
         
-        # CAPTCHA Settings
-        captcha_verify_role_id = settings_data.get("captcha_verify_role_id", None)
+        # CAPTCHA Settings. bot_settings.json is the primary source for the
+        # duplicated CAPTCHA values; security settings only backfill missing data.
+        if captcha_verify_role_id is None:
+            captcha_verify_role_id = settings_data.get("captcha_verify_role_id", None)
         
         # Panel texts
         panel_texts_data = settings_data.get("captcha_panel_texts", {})
-        captcha_panel_texts.clear()
         for guild_id_str, panel_data in panel_texts_data.items():
             try:
                 guild_id = int(guild_id_str)
-                captcha_panel_texts[guild_id] = panel_data
+                if guild_id not in captcha_panel_texts:
+                    captcha_panel_texts[guild_id] = panel_data
             except ValueError:
                 print(f"[SECURITY] Warning: Invalid guild ID in panel texts: {guild_id_str}")
         
@@ -864,6 +946,9 @@ events = {}
 usage_counts = {}
 event_nickname_counts = {}
 event_nickname_limit = {}  # For same nickname limit
+scheduled_messages_by_guild = {}
+scheduled_message_tasks = {}
+MIN_AUTOSEND_INTERVAL_SECONDS = 60
 
 # Captcha verification settings
 captcha_verify_role_id = None  # Role to grant upon successful captcha
@@ -1774,9 +1859,10 @@ async def on_interaction(interaction):
             
             # Check user limit if set
             user_limit = None
+            event_limits = get_normalized_event_limits(events[event_name])
             for role in interaction.user.roles:
-                if role.id in events[event_name]["limits"]:
-                    user_limit = events[event_name]["limits"][role.id]
+                if role.id in event_limits:
+                    user_limit = event_limits[role.id]
                     break
             
             if user_limit is not None:
@@ -1791,13 +1877,14 @@ async def on_interaction(interaction):
             # Create and send the modal
             class NicknameModal(discord.ui.Modal):
                 def __init__(self, event_name, nickname_limit):
-                    super().__init__(title=f"Register for {event_name}")
+                    event_data = events[event_name]
+                    super().__init__(title=get_effective_play_modal_title(event_name, event_data))
                     self.event_name = event_name
                     self.nickname_limit = nickname_limit
                     
                     self.nickname = discord.ui.TextInput(
-                        label="Your In-Game Username",
-                        placeholder="Enter your in-game username here...",
+                        label=get_effective_play_username_label(event_data),
+                        placeholder=get_effective_play_username_placeholder(event_data),
                         min_length=3,
                         max_length=32
                     )
@@ -1825,13 +1912,18 @@ async def on_interaction(interaction):
                     record_play(interaction.user.id, str(interaction.user), in_game_username, self.event_name)
                     
                     # Update usage count if limits are set
-                    if events[self.event_name]["limits"]:
+                    if get_normalized_event_limits(events[self.event_name]):
                         usage_key = f"{self.event_name}_{interaction.user.id}"
                         usage_counts[usage_key] = usage_counts.get(usage_key, 0) + 1
                     
                     # Send confirmation message
+                    success_message = get_effective_play_success_message(
+                        self.event_name,
+                        events[self.event_name],
+                        in_game_username,
+                    )
                     await interaction.response.send_message(
-                        f"Successfully registered for {self.event_name} with username: {in_game_username}",
+                        success_message,
                         ephemeral=True
                     )
                     
@@ -2977,6 +3069,382 @@ async def spamrules(ctx):
         await ctx.send(chunk)
 
 # ---------------- Play Event Section ----------------
+def normalize_autosend_name(schedule_name: str) -> str:
+    return (schedule_name or "").strip().lower()
+
+
+def parse_autosend_interval(raw_interval: str) -> int:
+    text = (raw_interval or "").strip().lower()
+    match = re.fullmatch(r"(\d+)\s*([smhd]?)", text)
+    if not match:
+        raise ValueError("Invalid interval format")
+
+    value = int(match.group(1))
+    unit = match.group(2) or "m"
+    multiplier = {
+        "s": 1,
+        "m": 60,
+        "h": 60 * 60,
+        "d": 24 * 60 * 60,
+    }[unit]
+    interval_seconds = value * multiplier
+    if interval_seconds < MIN_AUTOSEND_INTERVAL_SECONDS:
+        raise ValueError(f"Interval must be at least {MIN_AUTOSEND_INTERVAL_SECONDS} seconds")
+    return interval_seconds
+
+
+def format_autosend_interval(interval_seconds: int) -> str:
+    try:
+        seconds = int(interval_seconds)
+    except (TypeError, ValueError):
+        return "unknown"
+
+    units = [
+        ("d", 24 * 60 * 60),
+        ("h", 60 * 60),
+        ("m", 60),
+        ("s", 1),
+    ]
+    for label, size in units:
+        if seconds >= size and seconds % size == 0:
+            return f"{seconds // size}{label}"
+    return f"{seconds}s"
+
+
+def resolve_text_channel(guild: discord.Guild, channel_input: str):
+    raw = (channel_input or "").strip()
+    if raw.startswith("<#") and raw.endswith(">"):
+        raw = raw[2:-1]
+    try:
+        channel_id = int(raw)
+    except ValueError:
+        return None
+
+    channel = guild.get_channel(channel_id)
+    if isinstance(channel, discord.TextChannel):
+        return channel
+    return None
+
+
+def get_scheduled_messages_for_guild(guild_id: int):
+    return scheduled_messages_by_guild.setdefault(guild_id, {})
+
+
+def stop_scheduled_message_task(guild_id: int, schedule_name: str):
+    task_key = (guild_id, schedule_name)
+    task = scheduled_message_tasks.pop(task_key, None)
+    if task and not task.done():
+        task.cancel()
+
+
+async def send_scheduled_message_once(guild_id: int, schedule_name: str, schedule_data: dict) -> bool:
+    channel_id = schedule_data.get("channel_id")
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        guild = bot.get_guild(guild_id)
+        if guild is not None:
+            channel = guild.get_channel(channel_id)
+
+    if not isinstance(channel, discord.TextChannel):
+        print(f"[AUTOSEND] Channel not found for {guild_id}/{schedule_name}: {channel_id}")
+        return False
+
+    try:
+        await channel.send(schedule_data.get("message", ""))
+        return True
+    except Exception as exc:
+        print(f"[AUTOSEND] Failed to send {guild_id}/{schedule_name}: {exc}")
+        return False
+
+
+async def scheduled_message_loop(guild_id: int, schedule_name: str):
+    task_key = (guild_id, schedule_name)
+    try:
+        while True:
+            schedule_data = scheduled_messages_by_guild.get(guild_id, {}).get(schedule_name)
+            if not schedule_data or not schedule_data.get("enabled"):
+                return
+
+            await asyncio.sleep(int(schedule_data["interval_seconds"]))
+
+            schedule_data = scheduled_messages_by_guild.get(guild_id, {}).get(schedule_name)
+            if not schedule_data or not schedule_data.get("enabled"):
+                return
+            await send_scheduled_message_once(guild_id, schedule_name, schedule_data)
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        print(f"[AUTOSEND] Scheduler crashed for {guild_id}/{schedule_name}: {exc}")
+    finally:
+        current_task = asyncio.current_task()
+        if scheduled_message_tasks.get(task_key) is current_task:
+            scheduled_message_tasks.pop(task_key, None)
+
+
+def start_scheduled_message_task(guild_id: int, schedule_name: str):
+    schedule_data = scheduled_messages_by_guild.get(guild_id, {}).get(schedule_name)
+    if not schedule_data or not schedule_data.get("enabled"):
+        stop_scheduled_message_task(guild_id, schedule_name)
+        return
+
+    task_key = (guild_id, schedule_name)
+    existing_task = scheduled_message_tasks.get(task_key)
+    if existing_task and not existing_task.done():
+        return
+
+    scheduled_message_tasks[task_key] = bot.loop.create_task(
+        scheduled_message_loop(guild_id, schedule_name)
+    )
+
+
+def start_all_scheduled_message_tasks():
+    for guild_id, guild_schedules in scheduled_messages_by_guild.items():
+        for schedule_name, schedule_data in guild_schedules.items():
+            if schedule_data.get("enabled"):
+                start_scheduled_message_task(guild_id, schedule_name)
+
+
+def get_default_play_button_text():
+    return "Play"
+
+
+def get_default_play_message(event_name: str):
+    return f"Click the button below to register for **{event_name}**:"
+
+
+def get_effective_play_button_text(event_data: dict):
+    return event_data.get("custom_button_text") or get_default_play_button_text()
+
+
+def get_effective_play_message(event_name: str, event_data: dict):
+    return event_data.get("custom_message_text") or get_default_play_message(event_name)
+
+
+def get_default_play_success_message(event_name: str, in_game_username: str):
+    return f"Successfully registered for {event_name} with username: {in_game_username}"
+
+
+def get_effective_play_success_message(event_name: str, event_data: dict, in_game_username: str):
+    return event_data.get("custom_success_message") or get_default_play_success_message(event_name, in_game_username)
+
+
+def get_default_play_modal_title(event_name: str):
+    return f"Register for {event_name}"
+
+
+def get_effective_play_modal_title(event_name: str, event_data: dict):
+    return event_data.get("custom_modal_title") or get_default_play_modal_title(event_name)
+
+
+def get_default_play_username_label():
+    return "Your In-Game Username"
+
+
+def get_effective_play_username_label(event_data: dict):
+    return event_data.get("custom_username_label") or get_default_play_username_label()
+
+
+def get_default_play_username_placeholder():
+    return "Enter your in-game username here..."
+
+
+def get_effective_play_username_placeholder(event_data: dict):
+    return event_data.get("custom_username_placeholder") or get_default_play_username_placeholder()
+
+
+@bot.group(name="autosend", invoke_without_command=True)
+async def autosend(ctx):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    await ctx.send(
+        "Usage:\n"
+        "`!autosend set <name> <#channel|channel_id> <interval> <message>`\n"
+        "`!autosend list`\n"
+        "`!autosend stop <name>`\n"
+        "`!autosend start <name>`\n"
+        "`!autosend remove <name>`\n"
+        "`!autosend sendnow <name>`"
+    )
+
+
+@autosend.command(name="set")
+async def autosend_set(ctx, schedule_name: str, channel_input: str, interval: str, *, message: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+
+    clean_name = normalize_autosend_name(schedule_name)
+    if not clean_name:
+        await ctx.send("Please provide a schedule name.")
+        return
+    if len(clean_name) > 64:
+        await ctx.send("Schedule name must be 64 characters or less.")
+        return
+
+    target_channel = resolve_text_channel(ctx.guild, channel_input)
+    if target_channel is None:
+        await ctx.send("Please provide a valid text channel ID or channel mention.")
+        return
+
+    try:
+        interval_seconds = parse_autosend_interval(interval)
+    except ValueError as exc:
+        await ctx.send(
+            f"Invalid interval: {exc}. Examples: `60s`, `10m`, `2h`, `1d`. "
+            "A plain number is treated as minutes."
+        )
+        return
+
+    clean_message = message.strip()
+    if not clean_message:
+        await ctx.send("Message cannot be empty.")
+        return
+    if len(clean_message) > 2000:
+        await ctx.send("Message cannot be longer than 2000 characters.")
+        return
+
+    guild_schedules = get_scheduled_messages_for_guild(ctx.guild.id)
+    was_existing = clean_name in guild_schedules
+    task_key = (ctx.guild.id, clean_name)
+    existing_task = scheduled_message_tasks.get(task_key)
+    preserve_existing_timer = (
+        was_existing
+        and guild_schedules[clean_name].get("enabled")
+        and existing_task is not None
+        and not existing_task.done()
+    )
+    guild_schedules[clean_name] = {
+        "channel_id": target_channel.id,
+        "interval_seconds": interval_seconds,
+        "message": clean_message,
+        "enabled": True,
+    }
+
+    save_settings()
+    if not preserve_existing_timer:
+        stop_scheduled_message_task(ctx.guild.id, clean_name)
+        start_scheduled_message_task(ctx.guild.id, clean_name)
+    action = "updated" if was_existing else "created"
+    timer_text = "existing timer kept" if preserve_existing_timer else "timer started"
+    await ctx.send(
+        f"Autosend `{clean_name}` {action} for {target_channel.mention} "
+        f"every {format_autosend_interval(interval_seconds)} ({timer_text})."
+    )
+
+
+@autosend.command(name="list")
+async def autosend_list(ctx):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+
+    guild_schedules = scheduled_messages_by_guild.get(ctx.guild.id, {})
+    if not guild_schedules:
+        await ctx.send("No autosend messages are configured for this server.")
+        return
+
+    lines = ["**Autosend Messages**"]
+    for schedule_name, schedule_data in sorted(guild_schedules.items()):
+        status = "active" if schedule_data.get("enabled") else "stopped"
+        channel_id = schedule_data.get("channel_id")
+        interval_text = format_autosend_interval(schedule_data.get("interval_seconds"))
+        preview = str(schedule_data.get("message", "")).replace("\n", " ")
+        if len(preview) > 80:
+            preview = preview[:77] + "..."
+        lines.append(
+            f"`{schedule_name}` - {status} - <#{channel_id}> - every {interval_text} - {preview}"
+        )
+
+    for chunk in _chunk_text_message("\n".join(lines), limit=2000):
+        await ctx.send(chunk)
+
+
+@autosend.command(name="stop")
+async def autosend_stop(ctx, schedule_name: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+
+    clean_name = normalize_autosend_name(schedule_name)
+    guild_schedules = scheduled_messages_by_guild.get(ctx.guild.id, {})
+    if clean_name not in guild_schedules:
+        await ctx.send("Autosend message not found.")
+        return
+
+    guild_schedules[clean_name]["enabled"] = False
+    save_settings()
+    stop_scheduled_message_task(ctx.guild.id, clean_name)
+    await ctx.send(f"Autosend `{clean_name}` has been stopped.")
+
+
+@autosend.command(name="start")
+async def autosend_start(ctx, schedule_name: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+
+    clean_name = normalize_autosend_name(schedule_name)
+    guild_schedules = scheduled_messages_by_guild.get(ctx.guild.id, {})
+    if clean_name not in guild_schedules:
+        await ctx.send("Autosend message not found.")
+        return
+
+    schedule_data = guild_schedules[clean_name]
+    schedule_data["enabled"] = True
+    save_settings()
+    stop_scheduled_message_task(ctx.guild.id, clean_name)
+    sent = await send_scheduled_message_once(ctx.guild.id, clean_name, schedule_data)
+    start_scheduled_message_task(ctx.guild.id, clean_name)
+    if sent:
+        await ctx.send(f"Autosend `{clean_name}` has been started and sent once.")
+    else:
+        await ctx.send(
+            f"Autosend `{clean_name}` has been started, but the immediate send failed. "
+            "Check the channel and bot permissions."
+        )
+
+
+@autosend.command(name="remove")
+async def autosend_remove(ctx, schedule_name: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+
+    clean_name = normalize_autosend_name(schedule_name)
+    guild_schedules = scheduled_messages_by_guild.get(ctx.guild.id, {})
+    if clean_name not in guild_schedules:
+        await ctx.send("Autosend message not found.")
+        return
+
+    stop_scheduled_message_task(ctx.guild.id, clean_name)
+    del guild_schedules[clean_name]
+    if not guild_schedules:
+        scheduled_messages_by_guild.pop(ctx.guild.id, None)
+    save_settings()
+    await ctx.send(f"Autosend `{clean_name}` has been removed.")
+
+
+@autosend.command(name="sendnow")
+async def autosend_sendnow(ctx, schedule_name: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+
+    clean_name = normalize_autosend_name(schedule_name)
+    guild_schedules = scheduled_messages_by_guild.get(ctx.guild.id, {})
+    schedule_data = guild_schedules.get(clean_name)
+    if not schedule_data:
+        await ctx.send("Autosend message not found.")
+        return
+
+    sent = await send_scheduled_message_once(ctx.guild.id, clean_name, schedule_data)
+    if sent:
+        await ctx.send(f"Autosend `{clean_name}` sent once.")
+    else:
+        await ctx.send("Failed to send autosend message. Check the channel and bot permissions.")
+
+
 @bot.command(name="createplayevent")
 async def createplayevent(ctx, event_name: str):
     if not is_play_authorized(ctx):
@@ -2990,7 +3458,13 @@ async def createplayevent(ctx, event_name: str):
         "password": None,  # Added password field
         "channel_id": None,
         "excel_file": f"{event_name}_play_records.xlsx",
-        "limits": {}
+        "limits": {},
+        "custom_button_text": None,
+        "custom_message_text": None,
+        "custom_success_message": None,
+        "custom_modal_title": None,
+        "custom_username_label": None,
+        "custom_username_placeholder": None
     }
     event_nickname_counts[event_name] = {}  # Initialize same nickname counter.
     save_settings()
@@ -3095,25 +3569,132 @@ async def sendplay(ctx, event_name: str, channel_input: str = None):
             await ctx.send("No channel is set for this event. Please specify a channel.")
             return
     
+    event_data = events[event_name]
+    button_text = get_effective_play_button_text(event_data)
+    message_text = get_effective_play_message(event_name, event_data)
+    reset_event_usage_counts(event_name)
+
     # Create a button for the event
     class PlayButton(discord.ui.View):
         def __init__(self):
             super().__init__(timeout=None)
             self.add_item(discord.ui.Button(
                 style=discord.ButtonStyle.primary,
-                label="Play",
+                label=button_text,
                 custom_id=f"play_button_{event_name}"
             ))
     
     # Send the button
     try:
         await target_channel.send(
-            f"Click the button below to register for **{event_name}**:",
+            message_text,
             view=PlayButton()
         )
         await ctx.send(f"Play button for {event_name} has been sent to {target_channel.mention}")
     except Exception as e:
         await ctx.send(f"Failed to send play button: {str(e)}")
+
+
+@bot.command(name="setplaybuttontext")
+async def setplaybuttontext(ctx, event_name: str, *, text: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Please create the event first using !createplayevent.")
+        return
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        await ctx.send("Button text cannot be empty.")
+        return
+    events[event_name]["custom_button_text"] = cleaned_text
+    save_settings()
+    await ctx.send(f"Custom button text set for {event_name}: {cleaned_text}")
+
+
+@bot.command(name="setplaymessage")
+async def setplaymessage(ctx, event_name: str, *, text: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Please create the event first using !createplayevent.")
+        return
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        await ctx.send("Message text cannot be empty.")
+        return
+    events[event_name]["custom_message_text"] = cleaned_text
+    save_settings()
+    await ctx.send(f"Custom play message set for {event_name}: {cleaned_text}")
+
+
+@bot.command(name="setplaysuccessmessage")
+async def setplaysuccessmessage(ctx, event_name: str, *, text: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Please create the event first using !createplayevent.")
+        return
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        await ctx.send("Success message cannot be empty.")
+        return
+    events[event_name]["custom_success_message"] = cleaned_text
+    save_settings()
+    await ctx.send(f"Custom success message set for {event_name}: {cleaned_text}")
+
+
+@bot.command(name="setplaymodaltitle")
+async def setplaymodaltitle(ctx, event_name: str, *, text: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Please create the event first using !createplayevent.")
+        return
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        await ctx.send("Modal title cannot be empty.")
+        return
+    events[event_name]["custom_modal_title"] = cleaned_text
+    save_settings()
+    await ctx.send(f"Custom modal title set for {event_name}: {cleaned_text}")
+
+
+@bot.command(name="setplayusernamelabel")
+async def setplayusernamelabel(ctx, event_name: str, *, text: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Please create the event first using !createplayevent.")
+        return
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        await ctx.send("Username label cannot be empty.")
+        return
+    events[event_name]["custom_username_label"] = cleaned_text
+    save_settings()
+    await ctx.send(f"Custom username label set for {event_name}: {cleaned_text}")
+
+
+@bot.command(name="setplayusernameplaceholder")
+async def setplayusernameplaceholder(ctx, event_name: str, *, text: str):
+    if not is_play_authorized(ctx):
+        await ctx.message.delete()
+        return
+    if event_name not in events:
+        await ctx.send("Please create the event first using !createplayevent.")
+        return
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        await ctx.send("Username placeholder cannot be empty.")
+        return
+    events[event_name]["custom_username_placeholder"] = cleaned_text
+    save_settings()
+    await ctx.send(f"Custom username placeholder set for {event_name}: {cleaned_text}")
 
 @bot.command(name="removeplaybutton")
 async def removeplaybutton(ctx, event_name: str, channel_input: str = None):
@@ -3151,7 +3732,8 @@ async def removeplaybutton(ctx, event_name: str, channel_input: str = None):
         async for message in target_channel.history(limit=100):
             if message.components and f"play_button_{event_name}" in str(message.components):
                 await message.delete()
-                await ctx.send(f"Play button for {event_name} has been removed from {target_channel.mention}")
+                reset_event_usage_counts(event_name)
+                await ctx.send(f"Play button for {event_name} has been removed from {target_channel.mention} and usage counts have been reset.")
                 return
         await ctx.send(f"No play button found for {event_name} in {target_channel.mention}")
     except Exception as e:
@@ -3273,10 +3855,16 @@ async def sendplaysettings(ctx, event_name: str):
     channel_mention = f"<#{channel_id}>" if channel_id else "Not set"
     settings_text += f"**Channel:** {channel_mention}\n"
     settings_text += f"**Excel File:** {event_data['excel_file']}\n\n"
-    
+    settings_text += f"**Button Text:** {get_effective_play_button_text(event_data)}\n"
+    settings_text += f"**Message Text:** {get_effective_play_message(event_name, event_data)}\n"
+    settings_text += f"**Success Message:** {get_effective_play_success_message(event_name, event_data, '<username>')}\n\n"
+    settings_text += f"**Modal Title:** {get_effective_play_modal_title(event_name, event_data)}\n"
+    settings_text += f"**Username Label:** {get_effective_play_username_label(event_data)}\n"
+    settings_text += f"**Username Placeholder:** {get_effective_play_username_placeholder(event_data)}\n\n"
+
     settings_text += "**Interaction Limits:**\n"
     limits_text = ""
-    for role_id, limit in event_data["limits"].items():
+    for role_id, limit in get_normalized_event_limits(event_data).items():
         role = ctx.guild.get_role(role_id)
         role_name = role.name if role else f"Unknown Role ({role_id})"
         limits_text += f"  {role_name}: {limit}\n"
@@ -3834,33 +4422,56 @@ async def playhelp(ctx):
         "   - Description: Limits the number of times the same in-game username can be entered.\n\n"
         "8. **!sendplay <event_name> [channelID]**\n"
         "   - Description: Sends the Play button for the event.\n\n"
-        "9. **!sendplaylimit <event_name> <roleID or @role> <limit>**\n"
+        "9. **!setplaybuttontext <event_name> <text>**\n"
+        "   - Description: Sets custom button text for the event. If not set, the default `Play` text is used.\n"
+        "   - Example: `!setplaybuttontext Tournament2025 Join Now`\n\n"
+        "10. **!setplaymessage <event_name> <text>**\n"
+        "    - Description: Sets the custom message shown above the button. If not set, the original default message is used.\n"
+        "    - Example: `!setplaymessage Tournament2025 Click below to join **Tournament2025**`\n\n"
+        "11. **!setplaysuccessmessage <event_name> <text>**\n"
+        "    - Description: Sets the custom success message shown after the button flow is completed.\n"
+        "    - Example: `!setplaysuccessmessage Tournament2025 Registration received.`\n\n"
+        "12. **!setplaymodaltitle <event_name> <text>**\n"
+        "    - Description: Sets the modal title shown after pressing the play button.\n"
+        "    - Example: `!setplaymodaltitle Tournament2025 Tournament Registration`\n\n"
+        "13. **!setplayusernamelabel <event_name> <text>**\n"
+        "    - Description: Sets the username input label shown in the modal.\n"
+        "    - Example: `!setplayusernamelabel Tournament2025 Poker Username`\n\n"
+        "14. **!setplayusernameplaceholder <event_name> <text>**\n"
+        "    - Description: Sets the username input placeholder shown in the modal.\n"
+        "    - Example: `!setplayusernameplaceholder Tournament2025 Enter your poker nickname`\n\n"
+        "15. **!sendplaylimit <event_name> <roleID or @role> <limit>**\n"
         "   - Description: Sets the interaction limit for the specified role for the event.\n\n"
-        "10. **!sendplaysettings <event_name>**\n"
-        "    - Description: Displays all event settings.\n\n"
-        "11. **!getplayexcel <event_name>**\n"
+        "16. **!sendplaysettings <event_name>**\n"
+        "    - Description: Displays all event settings, including the effective button, message, success, and modal texts.\n\n"
+        "17. **!getplayexcel <event_name>**\n"
         "    - Description: Sends the Excel file.\n\n"
-        "12. **!deletesendplay <event_name>**\n"
+        "18. **!deletesendplay <event_name>**\n"
         "    - Description: Deletes the event and associated files (usage data is cleared).\n\n"
-        "13. **!playlistid <event_name>**\n"
+        "19. **!playlistid <event_name>**\n"
         "    - Description: Lists Discord IDs of event participants in a text file. The IDs are arranged side by side (separated by spaces), with every 150 IDs starting a new paragraph.\n\n"
-        "14. **!removeplaybutton <event_name>**\n"
-        "    - Description: Removes the Play button for the specified event.\n\n"
-        "15. **!allplaylist**\n"
+        "20. **!removeplaybutton <event_name>**\n"
+        "    - Description: Removes the Play button for the specified event. If the button is removed, usage counts for that event are reset.\n\n"
+        "21. **!allplaylist**\n"
         "    - Description: Lists all created events.\n\n"
-        "16. **!checkgameusername <event_name> <username1 username2 ...>**\n"
+        "22. **!checkgameusername <event_name> <username1 username2 ...>**\n"
         "    - Description: Checks if the provided game usernames match with Discord IDs in the event records. Now supports case-insensitive and fuzzy matching.\n"
         "    - Example: `!checkgameusername Tournament2025 Player1 Player2 Player3`\n\n"
-        "17. **!checkgameusername id <event_name> <username1 username2 ...>**\n"
+        "23. **!checkgameusername id <event_name> <username1 username2 ...>**\n"
         "    - Description: Same as above, but outputs only the Discord IDs in the text file.\n"
         "    - Example: `!checkgameusername id Tournament2025 Player1 Player2 Player3`\n\n"
-        "18. **!checkgameusernameid <event_name> <username1 username2 ...>**\n"
+        "24. **!checkgameusernameid <event_name> <username1 username2 ...>**\n"
         "    - Description: Alias for the above command, outputs only Discord IDs.\n"
         "    - Example: `!checkgameusernameid Tournament2025 Player1 Player2 Player3`\n\n"
-        "19. **!getusername <url> <selector>**\n"
+        "25. **!getusername <url> <selector>**\n"
         "    - Description: Extracts player names from a webpage using the specified selector and saves them to a text file.\n"
         "    - Example: `!getusername https://app.lepoker.io/m/lj2Dxdy/players \"div.truncate\"`\n\n"
-        "20. **!playhelp**\n"
+        "26. **!autosend set <name> <#channel|channelID> <interval> <message>**\n"
+        "    - Description: Sends the specified message to the selected channel repeatedly. Intervals support `60s`, `10m`, `2h`, `1d`; plain numbers are minutes.\n"
+        "    - Example: `!autosend set tournament #announcements 30m Tournament starts soon!`\n\n"
+        "27. **!autosend list / stop <name> / start <name> / remove <name> / sendnow <name>**\n"
+        "    - Description: Lists, pauses, resumes, deletes, or immediately sends configured autosend messages.\n\n"
+        "28. **!playhelp**\n"
         "    - Description: Shows this help menu.\n"
     )
     
@@ -4461,6 +5072,7 @@ async def on_ready():
         bot.add_view(CaptchaVerifyView())
     except Exception:
         pass
+    start_all_scheduled_message_tasks()
     print(f"Logged in as {bot.user} (ID: {getattr(bot.user, 'id', '-')})")
     print("[SETTINGS] Bot ready with loaded settings")
 
@@ -4705,20 +5317,19 @@ async def sendverifypanel(ctx, channel: str = None):
         "image": None
     })
 
-    # Create message with button
-    message_text = f"**{panel_text['title']}**\n\n{panel_text['description']}"
-    
-    # If there's an image URL, send it separately since we can't embed without embeds
+    # Keep the panel and its optional image in one message. Sending the image as
+    # a raw URL creates a second, oversized message in Discord.
     image_url = panel_text.get("image")
+    panel_embed = discord.Embed(
+        title=panel_text.get("title", DEFAULT_PANEL_TITLE),
+        description=panel_text.get("description", DEFAULT_PANEL_DESCRIPTION),
+        color=discord.Color.blurple(),
+    )
+    if image_url:
+        panel_embed.set_image(url=image_url)
     
     try:
-        # Send the verification message with button
-        await target_channel.send(content=message_text, view=CaptchaVerifyView())
-        
-        # If there's an image, send it as a separate message
-        if image_url:
-            await target_channel.send(image_url)
-        
+        await target_channel.send(embed=panel_embed, view=CaptchaVerifyView())
         await ctx.send(f"Verification panel sent to: {target_channel.mention}")
     except Exception as e:
         await ctx.send("Failed to send verification panel.")
